@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from ai.config import settings
+from ai.routes import chat_routes
 from ai.routes import cycle_routes
 
 app = FastAPI(
@@ -9,6 +10,7 @@ app = FastAPI(
 )
 
 app.include_router(cycle_routes.router, prefix="/api")
+app.include_router(chat_routes.router, prefix="/api")
 
 @app.get("/health")
 async def health_check():

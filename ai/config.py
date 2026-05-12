@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     BACKEND_REFRESH_TOKEN: str = ""
     CLAUDE_API_KEY: str = ""
     CLAUDE_MODEL: str = "claude-opus-4-7"
+    CHAT_HISTORY_DB_PATH: str = "data/chat_history.db"
 
     class Config:
         env_file = ".env"

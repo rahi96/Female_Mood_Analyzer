@@ -10,3 +10,7 @@ ENV/
 .DS_Store
 .idea/
 .vscode/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+.puku/
