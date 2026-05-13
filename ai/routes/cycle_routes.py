@@ -1,6 +1,13 @@
 from fastapi import APIRouter, HTTPException
-from ai.models.bbt_models import CycleInsightsRequest, CycleInsightsResponse
-from ai.services.cycle_service import analyze_cycle, fetch_backend_data
+from ai.models.bbt_models import (
+    CycleInsightsRequest,
+    CycleInsightsResponse,
+    DailyTipRequest,
+    DailyTipResponse,
+    DailyVerseRequest,
+    DailyVerseResponse,
+)
+from ai.services.cycle_service import analyze_cycle, fetch_backend_data, generate_daily_tip, generate_daily_verse
 
 router = APIRouter()
 
@@ -19,3 +26,19 @@ async def cycle_insights_endpoint(request: CycleInsightsRequest):
         return analyze_cycle(request)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
+
+
+@router.post("/daily-tip", response_model=DailyTipResponse)
+async def daily_tip_endpoint(request: DailyTipRequest):
+    try:
+        return generate_daily_tip(request)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Daily tip failed: {exc}")
+
+
+@router.post("/daily-verse", response_model=DailyVerseResponse)
+async def daily_verse_endpoint(request: DailyVerseRequest):
+    try:
+        return generate_daily_verse(request)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Daily verse failed: {exc}")

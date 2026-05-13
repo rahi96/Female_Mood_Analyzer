@@ -28,3 +28,21 @@ class CycleInsightsRequest(BaseModel):
 class CycleInsightsResponse(BaseModel):
     cycle_phase: str
     message: str
+
+
+class DailyTipRequest(BaseModel):
+    user_id: str
+
+
+class DailyTipResponse(BaseModel):
+    title: str
+    tip: str
+
+
+class DailyVerseRequest(BaseModel):
+    user_id: str
+
+
+class DailyVerseResponse(BaseModel):
+    verse: str
+    reference: str

@@ -9,8 +9,8 @@ app = FastAPI(
     debug=settings.DEBUG,
 )
 
-app.include_router(cycle_routes.router, prefix="/api")
-app.include_router(chat_routes.router, prefix="/api")
+app.include_router(cycle_routes.router, prefix="/api", tags=["App_api's"])
+app.include_router(chat_routes.router, prefix="/api", tags=["Chatbot_api's"])
 
 @app.get("/health")
 async def health_check():
