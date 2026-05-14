@@ -46,3 +46,15 @@ class DailyVerseRequest(BaseModel):
 class DailyVerseResponse(BaseModel):
     verse: str
     reference: str
+
+
+class MovementRecommendationRequest(BaseModel):
+    user_id: str
+
+
+class MovementRecommendationResponse(BaseModel):
+    phase_name: str
+    day_range: str
+    description: str
+    recommended_workouts: List[str]
+    mfy_examples: List[str]
