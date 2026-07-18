@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class PdfSummaryRequest(BaseModel):
-    pdf_path: Optional[str] = Field(default=None, min_length=1)
+    report_id: Optional[int] = Field(default=None, ge=1)
 
 
 class HormoneBiomarker(BaseModel):
@@ -40,6 +40,7 @@ class HormonalPanelSummary(BaseModel):
 
 
 class PdfSummaryResponse(BaseModel):
+    report_id: Optional[int] = None
     source_path: str
     content_type: str
     file_size_bytes: int

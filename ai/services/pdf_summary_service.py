@@ -38,12 +38,13 @@ Rules:
 
 
 def summarize_pdf(request: PdfSummaryRequest | None = None) -> PdfSummaryResponse:
-    pdf_path = request.pdf_path if request else None
-    pdf_content, content_type, source = fetch_backend_pdf(pdf_path)
+    report_id = request.report_id if request else None
+    pdf_content, content_type, source, resolved_report_id = fetch_backend_pdf(report_id)
     report_text = _extract_pdf_text(pdf_content)
     summary = _generate_hormonal_panel_summary(report_text)
 
     return PdfSummaryResponse(
+        report_id=resolved_report_id,
         source_path=source,
         content_type=content_type,
         file_size_bytes=len(pdf_content),
@@ -52,19 +53,19 @@ def summarize_pdf(request: PdfSummaryRequest | None = None) -> PdfSummaryRespons
     )
 
 
-def fetch_backend_pdf(pdf_path: str | None = None) -> tuple[bytes, str, str]:
-    source = pdf_path or settings.LAB_REPORTS_URL
+def fetch_backend_pdf(report_id: int | None = None) -> tuple[bytes, str, str, int | None]:
+    source = settings.LAB_REPORTS_URL
     response = _get_backend_response(source)
     content_type = response.headers.get("content-type", "application/octet-stream")
     content = response.content
 
     if _is_pdf_response(content_type, content):
-        return content, content_type, source
+        return content, content_type, source, report_id
 
     if "json" not in content_type.lower():
         raise ValueError("Backend route did not return a PDF file")
 
-    pdf_source = _extract_pdf_source(response.json())
+    pdf_source, resolved_report_id = _extract_pdf_source(response.json(), report_id)
     pdf_response = _get_backend_response(pdf_source)
     pdf_content_type = pdf_response.headers.get("content-type", "application/octet-stream")
     pdf_content = pdf_response.content
@@ -72,7 +73,7 @@ def fetch_backend_pdf(pdf_path: str | None = None) -> tuple[bytes, str, str]:
     if not _is_pdf_response(pdf_content_type, pdf_content):
         raise ValueError("Backend lab report link did not return a PDF file")
 
-    return pdf_content, pdf_content_type, pdf_source
+    return pdf_content, pdf_content_type, pdf_source, resolved_report_id
 
 
 def _generate_hormonal_panel_summary(report_text: str) -> HormonalPanelSummary:
@@ -372,18 +373,17 @@ def _is_pdf_response(content_type: str, content: bytes) -> bool:
     return "application/pdf" in content_type.lower() or content.startswith(b"%PDF")
 
 
-def _extract_pdf_source(payload: Any) -> str:
-    candidates: list[str] = []
+def _extract_pdf_source(payload: Any, report_id: int | None = None) -> tuple[str, int | None]:
+    candidates: list[tuple[str, int | None]] = []
 
     def walk(value: Any) -> None:
         if isinstance(value, dict):
-            for key, child in value.items():
-                key_name = str(key).lower()
-                if isinstance(child, str) and any(
-                    marker in key_name
-                    for marker in ("lab_report", "pdf", "file", "url", "path", "document")
-                ):
-                    candidates.append(child)
+            pdf_source = _pdf_source_from_record(value)
+            candidate_id = _extract_report_id(value)
+            if pdf_source:
+                candidates.append((pdf_source, candidate_id))
+
+            for child in value.values():
                 walk(child)
         elif isinstance(value, list):
             for item in value:
@@ -391,13 +391,51 @@ def _extract_pdf_source(payload: Any) -> str:
 
     walk(payload)
 
-    for candidate in candidates:
+    if report_id is not None:
+        for candidate, candidate_id in candidates:
+            if candidate_id == report_id:
+                return candidate, candidate_id
+        raise ValueError(f"Backend lab reports response did not include lab report id {report_id}")
+
+    for candidate, candidate_id in candidates:
         if ".pdf" in candidate.lower():
-            return candidate
+            return candidate, candidate_id
     if candidates:
         return candidates[0]
 
     raise ValueError("Backend lab reports response did not include a PDF link")
+
+
+def _pdf_source_from_record(record: dict) -> str | None:
+    preferred: list[str] = []
+    fallback: list[str] = []
+
+    for key, child in record.items():
+        key_name = str(key).lower()
+        if not isinstance(child, str):
+            continue
+        if not any(marker in key_name for marker in ("lab_report", "pdf", "file", "url", "path", "document")):
+            continue
+        if ".pdf" in child.lower():
+            preferred.append(child)
+        else:
+            fallback.append(child)
+
+    if preferred:
+        return preferred[0]
+    if fallback:
+        return fallback[0]
+    return None
+
+
+def _extract_report_id(record: dict) -> int | None:
+    for key in ("id", "lab_report_id", "report_id"):
+        value = record.get(key)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _backend_url(path: str) -> str:
