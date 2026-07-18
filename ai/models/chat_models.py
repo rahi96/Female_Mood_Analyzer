@@ -50,3 +50,16 @@ class TemperatureStats(BaseModel):
     values: list[float] = []
     dates: list[str] = []
     raw: Any = None
+
+
+ChatPlan = Literal["free", "premium", "elite"]
+
+
+class ChatLimitReachedDetail(BaseModel):
+    code: Literal["CHAT_LIMIT_REACHED"] = "CHAT_LIMIT_REACHED"
+    plan: ChatPlan
+    chat_limit: int
+    chats_used: int
+    chats_remaining: int = 0
+    upgrade_to: Literal["premium", "elite"]
+    message: str

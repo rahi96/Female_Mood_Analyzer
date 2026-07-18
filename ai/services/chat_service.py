@@ -4,7 +4,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from langchain_core.prompts import PromptTemplate
@@ -15,14 +15,22 @@ from ai.models.chat_models import (
     ChatDataSummary,
     ChatHistoryRequest,
     ChatHistoryResponse,
+    ChatLimitReachedDetail,
     ChatMessage,
+    ChatPlan,
     ChatResponse,
     ChatResponseRequest,
     ConversationRecord,
     TemperatureStats,
 )
-from ai.services.cycle_service import fetch_backend_data
+from ai.services.cycle_service import fetch_backend_data, fetch_subscription
 from ai.utils.llm_call import llm_call
+
+
+class ChatLimitReached(Exception):
+    def __init__(self, detail: ChatLimitReachedDetail):
+        self.detail = detail
+        super().__init__(detail.message)
 
 
 CHATBOT_SYSTEM_PROMPT = """
@@ -163,6 +171,9 @@ MEMORY_SUMMARY_PROMPT = PromptTemplate.from_template(MEMORY_SUMMARY_TEMPLATE)
 def generate_chat_response(request: ChatResponseRequest) -> ChatResponse:
     session_id = request.session_id or str(uuid4())
     timestamp = _utc_timestamp()
+
+    _enforce_chat_quota(request.user_id)
+
     user_data = fetch_backend_data(request.user_id)
     history = _get_history(request.user_id, session_id)
     long_term_memory = _get_long_term_memory(request.user_id)
@@ -185,6 +196,7 @@ def generate_chat_response(request: ChatResponseRequest) -> ChatResponse:
         session_id,
         ConversationRecord(role="assistant", content=response_text, timestamp=_utc_timestamp()),
     )
+    _increment_chats_used(request.user_id)
     _maybe_update_long_term_memory(request.user_id)
 
     stats = _extract_temperature_stats(user_data)
@@ -207,6 +219,80 @@ def get_chat_history(request: ChatHistoryRequest) -> ChatHistoryResponse:
 
     all_history = _get_user_history(request.user_id)
     return _history_response(all_history, None)
+
+
+def _enforce_chat_quota(user_id: str) -> None:
+    plan = fetch_user_plan(user_id)
+    chats_used = _get_chats_used(user_id)
+    chat_limit = _chat_limit_for_plan(plan)
+
+    if chat_limit is None or chats_used < chat_limit:
+        return
+
+    upgrade_to: Literal["premium", "elite"] = "elite" if plan == "premium" else "premium"
+    raise ChatLimitReached(
+        ChatLimitReachedDetail(
+            plan=plan,
+            chat_limit=chat_limit,
+            chats_used=chats_used,
+            chats_remaining=0,
+            upgrade_to=upgrade_to,
+            message=(
+                "Free chat limit reached. Purchase Premium to continue."
+                if plan == "free"
+                else "Chat limit reached. Upgrade your plan to continue."
+            ),
+        )
+    )
+
+
+def fetch_user_plan(user_id: str) -> ChatPlan:
+    """Read plan from healthcare backend. Defaults to free if unavailable."""
+    try:
+        payload = fetch_subscription(user_id)
+    except Exception:
+        return "free"
+
+    raw = payload.get("plan") or payload.get("subscription") or payload.get("tier")
+    if isinstance(raw, dict):
+        raw = raw.get("plan") or raw.get("name") or raw.get("type")
+
+    plan = str(raw or "free").strip().lower()
+    if plan in {"free", "premium", "elite"}:
+        return plan  # type: ignore[return-value]
+    return "free"
+
+
+def _chat_limit_for_plan(plan: ChatPlan) -> int | None:
+    if plan == "free":
+        return settings.FREE_CHAT_LIMIT
+    if plan == "premium":
+        return settings.PREMIUM_CHAT_LIMIT
+    return None
+
+
+def _get_chats_used(user_id: str) -> int:
+    with _connect_chat_db() as conn:
+        row = conn.execute(
+            "SELECT chats_used FROM chat_usage WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return int(row["chats_used"]) if row else 0
+
+
+def _increment_chats_used(user_id: str) -> None:
+    with _connect_chat_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO chat_usage (user_id, chats_used, updated_at)
+            VALUES (?, 1, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                chats_used = chats_used + 1,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, _utc_timestamp()),
+        )
+        conn.commit()
 
 
 def construct_message_prompt(
@@ -561,6 +647,15 @@ def _ensure_chat_schema(conn: sqlite3.Connection) -> None:
             user_id TEXT PRIMARY KEY,
             summary TEXT NOT NULL DEFAULT '',
             summarized_message_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_usage (
+            user_id TEXT PRIMARY KEY,
+            chats_used INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         )
         """

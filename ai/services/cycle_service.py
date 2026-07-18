@@ -40,6 +40,11 @@ def fetch_cycle_temperature_report(user_id: str) -> dict:
     return _get_backend_json(f"/user/lon-temperature-report/{user_id}")
 
 
+def fetch_subscription(user_id: str) -> dict:
+    path = settings.SUBSCRIPTION_STATUS_PATH.format(user_id=user_id)
+    return _get_backend_json(path)
+
+
 def _get_backend_json(path: str) -> dict:
     headers = {}
 
@@ -52,7 +57,6 @@ def _get_backend_json(path: str) -> dict:
     response = httpx.get(url, headers=headers, timeout=30.0)
     response.raise_for_status()
     return response.json()
-
 
 def analyze_cycle(request: CycleInsightsRequest) -> CycleInsightsResponse:
     payload = fetch_cycle_temperature_report(request.user_id)

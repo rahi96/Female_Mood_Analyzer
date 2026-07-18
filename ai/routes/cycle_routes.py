@@ -7,7 +7,12 @@ from ai.models.bbt_models import (
     DailyVerseRequest,
     DailyVerseResponse,
 )
-from ai.services.cycle_service import analyze_cycle, fetch_backend_data, generate_daily_tip, generate_daily_verse
+from ai.services.cycle_service import (
+    analyze_cycle,
+    fetch_backend_data,
+    generate_daily_tip,
+    generate_daily_verse,
+)
 
 router = APIRouter()
 

@@ -6,7 +6,7 @@ from ai.models.chat_models import (
     ChatResponse,
     ChatResponseRequest,
 )
-from ai.services.chat_service import generate_chat_response, get_chat_history
+from ai.services.chat_service import ChatLimitReached, generate_chat_response, get_chat_history
 
 
 router = APIRouter()
@@ -16,6 +16,8 @@ router = APIRouter()
 async def chat_response_endpoint(request: ChatResponseRequest):
     try:
         return generate_chat_response(request)
+    except ChatLimitReached as exc:
+        raise HTTPException(status_code=402, detail=exc.detail.model_dump())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Chat response failed: {exc}")
 
