@@ -8,6 +8,7 @@ router = APIRouter()
 
 
 @router.get("/summarize-pdf", response_model=PdfSummaryResponse)
+@router.post("/summarize-pdf", response_model=PdfSummaryResponse)
 async def summarize_pdf_endpoint():
     try:
         return summarize_pdf()
