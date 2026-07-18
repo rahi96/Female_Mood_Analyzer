@@ -7,7 +7,7 @@ from ai.services.pdf_summary_service import summarize_pdf
 router = APIRouter()
 
 
-@router.post("/summarize-pdf", response_model=PdfSummaryResponse)
+@router.get("/summarize-pdf", response_model=PdfSummaryResponse)
 async def summarize_pdf_endpoint():
     try:
         return summarize_pdf()
