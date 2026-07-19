@@ -8,7 +8,6 @@ router = APIRouter()
 
 
 @router.get("/skin-scan", response_model=SkinScanResponse)
-@router.post("/skin-scan", response_model=SkinScanResponse)
 async def skin_scan_endpoint():
     try:
         return analyze_skin_scan()
