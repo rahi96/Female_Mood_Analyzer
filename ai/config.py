@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     BACKEND_URL: str = "https://hard-hulky-diane.ngrok-free.dev/api/v1"
     BACKEND_ACCESS_TOKEN: str = ""
     LAB_REPORTS_URL: str = "https://overapprehensive-optatively-meri.ngrok-free.dev/api/v1/lab-reports"
+    SKIN_SCANS_URL: str = "https://hard-hulky-diane.ngrok-free.dev/api/v1/skin-scans"
     BACKEND_REFRESH_TOKEN: str = ""
     CLAUDE_API_KEY: str = ""
     CLAUDE_MODEL: str = "claude-opus-4-7"
