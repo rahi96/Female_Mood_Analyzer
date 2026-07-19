@@ -33,11 +33,21 @@ Rules:
 - Return valid JSON only. Do not add markdown, code fences, or extra commentary.
 """
 
+BBT_SYSTEM_PROMPT = """You are a careful basal body temperature chart analysis assistant.
+
+Rules:
+- Use only the user profile and health snapshot JSON provided.
+- Do not diagnose, prescribe, or claim medical certainty.
+- Generate the BBT section for a cycle engine UI.
+- If raw BBT readings are missing, create cautious UI-ready estimates and clearly mark them as estimated.
+- Return valid JSON only. Do not add markdown, code fences, or extra commentary.
+"""
 def fetch_cycle_engine_data() -> dict[str, Any]:
     user_profile = _get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
     snapshot = _get_backend_json(settings.CYCLE_ENGINE_SNAPSHOT_URL)
     engine = _generate_engine_analysis(user_profile, snapshot)
     calendar = _generate_calendar_analysis(user_profile, snapshot)
+    bbt = _generate_bbt_analysis(user_profile, snapshot)
 
     return {
         "status": "ready",
@@ -49,6 +59,7 @@ def fetch_cycle_engine_data() -> dict[str, Any]:
         },
         "engine": engine,
         "calendar": calendar,
+        "bbt": bbt,
         "user_profile": user_profile,
         "snapshot": snapshot,
     }
@@ -279,6 +290,319 @@ def _fallback_calendar_analysis() -> dict[str, Any]:
         },
     }
 
+
+def _generate_bbt_analysis(user_profile: Any, snapshot: Any) -> dict[str, Any]:
+    prompt = _build_bbt_prompt(user_profile, snapshot)
+    response_text = _call_bbt_llm(prompt)
+    parsed = _parse_bbt_response(response_text)
+    if parsed:
+        return parsed
+    return _fallback_bbt_analysis()
+
+
+def _build_bbt_prompt(user_profile: Any, snapshot: Any) -> str:
+    context = json.dumps(
+        {
+            "user_profile": user_profile,
+            "snapshot": snapshot,
+        },
+        ensure_ascii=False,
+        default=str,
+    )[:MAX_CONTEXT_CHARS]
+
+    return f"""Generate only the BBT section for a cycle engine UI.
+
+Backend context JSON:
+{context}
+
+Return JSON with exactly this structure:
+{{
+  "chart": {{
+    "title": "BBT Chart",
+    "cycle_day_range": "Cycle day 1-28",
+    "subtitle": "Coverline 97.6F - shift confirmed Day 18",
+    "time_filter": "This month",
+    "unit": "F",
+    "coverline": {{"value": 97.6, "label": "Coverline"}},
+    "shift": {{"confirmed": true, "confirmed_day": 18, "label": "shift confirmed Day 18"}},
+    "points": [
+      {{"cycle_day": 1, "temperature": 97.4, "type": "normal"}},
+      {{"cycle_day": 2, "temperature": 97.5, "type": "ovulation"}}
+    ],
+    "ovulation_markers": [{{"cycle_day": 18, "label": "Ov."}}],
+    "legend": [
+      {{"label": "Coverline", "type": "coverline"}},
+      {{"label": "Ov.", "type": "ovulation"}}
+    ]
+  }},
+  "coverline_algorithm": {{
+    "title": "Coverline Algorithm",
+    "steps": [
+      {{"status": "confirmed", "label": "Coverline", "description": "Highest of the 6 pre-shift low temps (Days 6-15) + 0.2F"}},
+      {{"status": "confirmed", "label": "Shift rule", "description": "Requires 3 consecutive days at least 0.2F above coverline"}},
+      {{"status": "confirmed", "label": "Shift confirmed", "description": "Days 16-18 confirm ovulation timing"}}
+    ],
+    "metrics": [
+      {{"label": "Coverline", "value": "97.6F"}},
+      {{"label": "Luteal length", "value": "12d"}},
+      {{"label": "Phase", "value": "Normal"}}
+    ]
+  }},
+  "log_today_bbt": {{
+    "title": "Log today's BBT",
+    "instructions": "Take immediately upon waking, at the same time every day.",
+    "subtext": "Subtract 0.1F for every 30 minutes after normal wake time.",
+    "input_placeholder": "e.g. 98.1F",
+    "submit_label": "Log",
+    "flags_note": "Flag disturbances - flagged readings are excluded from coverline calculation.",
+    "flags": ["Illness", "Late night", "Alcohol", "Restless sleep"]
+  }}
+}}
+
+Requirements:
+- Generate chart, coverline_algorithm, and log_today_bbt.
+- If raw BBT readings are not present in backend context, points may be estimated for UI display and should avoid claiming exact clinical certainty.
+- chart.points should contain around 28 cycle-day temperature points when possible.
+- Temperatures must be Fahrenheit numbers around 96.8 to 98.8.
+- Keep strings concise and UI-ready.
+"""
+
+
+def _call_bbt_llm(prompt: str) -> str:
+    attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
+
+    for attempt in range(attempts):
+        try:
+            return llm_call(
+                prompt=prompt,
+                system=BBT_SYSTEM_PROMPT,
+                max_tokens=1800,
+            )
+        except Exception as exc:
+            is_last_attempt = attempt == attempts - 1
+            if not _is_retryable_llm_error(exc):
+                raise
+            if is_last_attempt:
+                return ""
+            time.sleep(LLM_RETRY_DELAYS_SECONDS[attempt])
+
+    return ""
+
+
+def _parse_bbt_response(text: str) -> dict[str, Any] | None:
+    payload = _parse_json_object(text)
+    if payload is None:
+        return None
+
+    try:
+        return _coerce_bbt_payload(payload)
+    except Exception:
+        return None
+
+
+def _coerce_bbt_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return _fallback_bbt_analysis()
+
+    fallback = _fallback_bbt_analysis()
+    chart = payload.get("chart") if isinstance(payload.get("chart"), dict) else {}
+    algorithm = payload.get("coverline_algorithm") if isinstance(payload.get("coverline_algorithm"), dict) else {}
+    log_today = payload.get("log_today_bbt") if isinstance(payload.get("log_today_bbt"), dict) else {}
+
+    return {
+        "chart": _coerce_bbt_chart(chart, fallback["chart"]),
+        "coverline_algorithm": _coerce_coverline_algorithm(algorithm, fallback["coverline_algorithm"]),
+        "log_today_bbt": _coerce_log_today_bbt(log_today, fallback["log_today_bbt"]),
+    }
+
+
+def _coerce_bbt_chart(value: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    points = value.get("points") if isinstance(value.get("points"), list) else fallback["points"]
+    markers = value.get("ovulation_markers") if isinstance(value.get("ovulation_markers"), list) else fallback["ovulation_markers"]
+    legend = value.get("legend") if isinstance(value.get("legend"), list) else fallback["legend"]
+    coverline = value.get("coverline") if isinstance(value.get("coverline"), dict) else fallback["coverline"]
+    shift = value.get("shift") if isinstance(value.get("shift"), dict) else fallback["shift"]
+
+    return {
+        "title": str(value.get("title") or fallback["title"]),
+        "cycle_day_range": str(value.get("cycle_day_range") or fallback["cycle_day_range"]),
+        "subtitle": str(value.get("subtitle") or fallback["subtitle"]),
+        "time_filter": str(value.get("time_filter") or fallback["time_filter"]),
+        "unit": str(value.get("unit") or fallback["unit"]),
+        "coverline": {
+            "value": _temperature_value(coverline.get("value"), fallback["coverline"]["value"]),
+            "label": str(coverline.get("label") or fallback["coverline"]["label"]),
+        },
+        "shift": {
+            "confirmed": bool(shift.get("confirmed", fallback["shift"]["confirmed"])),
+            "confirmed_day": _bounded_int(shift.get("confirmed_day"), fallback["shift"]["confirmed_day"], 1, 60),
+            "label": str(shift.get("label") or fallback["shift"]["label"]),
+        },
+        "points": _coerce_bbt_points(points, fallback["points"]),
+        "ovulation_markers": _coerce_markers(markers, fallback["ovulation_markers"]),
+        "legend": _coerce_legend(legend, fallback["legend"]),
+    }
+
+
+def _coerce_coverline_algorithm(value: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    steps = value.get("steps") if isinstance(value.get("steps"), list) else fallback["steps"]
+    metrics = value.get("metrics") if isinstance(value.get("metrics"), list) else fallback["metrics"]
+    return {
+        "title": str(value.get("title") or fallback["title"]),
+        "steps": _coerce_algorithm_steps(steps, fallback["steps"]),
+        "metrics": _coerce_label_value_list(metrics, fallback["metrics"]),
+    }
+
+
+def _coerce_log_today_bbt(value: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    flags = value.get("flags") if isinstance(value.get("flags"), list) else fallback["flags"]
+    return {
+        "title": str(value.get("title") or fallback["title"]),
+        "instructions": str(value.get("instructions") or fallback["instructions"]),
+        "subtext": str(value.get("subtext") or fallback["subtext"]),
+        "input_placeholder": str(value.get("input_placeholder") or fallback["input_placeholder"]),
+        "submit_label": str(value.get("submit_label") or fallback["submit_label"]),
+        "flags_note": str(value.get("flags_note") or fallback["flags_note"]),
+        "flags": [str(flag) for flag in flags],
+    }
+
+
+def _coerce_bbt_points(points: list[Any], fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    coerced = []
+    for item in points:
+        if not isinstance(item, dict):
+            continue
+        coerced.append(
+            {
+                "cycle_day": _bounded_int(item.get("cycle_day"), len(coerced) + 1, 1, 60),
+                "temperature": _temperature_value(item.get("temperature"), 97.4),
+                "type": str(item.get("type") or "normal"),
+            }
+        )
+    return coerced or fallback
+
+
+def _coerce_markers(markers: list[Any], fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    coerced = []
+    for item in markers:
+        if not isinstance(item, dict):
+            continue
+        coerced.append(
+            {
+                "cycle_day": _bounded_int(item.get("cycle_day"), 18, 1, 60),
+                "label": str(item.get("label") or "Ov."),
+            }
+        )
+    return coerced or fallback
+
+
+def _coerce_legend(items: list[Any], fallback: list[dict[str, str]]) -> list[dict[str, str]]:
+    coerced = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        coerced.append({"label": str(item.get("label") or ""), "type": str(item.get("type") or "normal")})
+    return coerced or fallback
+
+
+def _coerce_algorithm_steps(steps: list[Any], fallback: list[dict[str, str]]) -> list[dict[str, str]]:
+    coerced = []
+    for item in steps:
+        if not isinstance(item, dict):
+            continue
+        coerced.append(
+            {
+                "status": str(item.get("status") or "pending"),
+                "label": str(item.get("label") or "Step"),
+                "description": str(item.get("description") or "Awaiting more logged BBT data."),
+            }
+        )
+    return coerced or fallback
+
+
+def _coerce_label_value_list(items: list[Any], fallback: list[dict[str, str]]) -> list[dict[str, str]]:
+    coerced = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        coerced.append({"label": str(item.get("label") or ""), "value": str(item.get("value") or "")})
+    return coerced or fallback
+
+
+def _temperature_value(value: Any, default: float) -> float:
+    try:
+        number = float(str(value).replace("F", "").strip())
+    except (TypeError, ValueError):
+        number = default
+    return round(max(95.0, min(100.5, number)), 2)
+
+
+def _fallback_bbt_analysis() -> dict[str, Any]:
+    return {
+        "chart": {
+            "title": "BBT Chart",
+            "cycle_day_range": "Cycle day 1-28",
+            "subtitle": "Coverline 97.6F - shift confirmed Day 18",
+            "time_filter": "This month",
+            "unit": "F",
+            "coverline": {"value": 97.6, "label": "Coverline"},
+            "shift": {"confirmed": True, "confirmed_day": 18, "label": "shift confirmed Day 18"},
+            "points": _fallback_bbt_points(),
+            "ovulation_markers": [{"cycle_day": 18, "label": "Ov."}],
+            "legend": [
+                {"label": "Coverline", "type": "coverline"},
+                {"label": "Ov.", "type": "ovulation"},
+            ],
+        },
+        "coverline_algorithm": {
+            "title": "Coverline Algorithm",
+            "steps": [
+                {
+                    "status": "confirmed",
+                    "label": "Coverline",
+                    "description": "Highest of the 6 pre-shift low temps (Days 6-15) + 0.2F",
+                },
+                {
+                    "status": "confirmed",
+                    "label": "Shift rule",
+                    "description": "Requires 3 consecutive days at least 0.2F above coverline.",
+                },
+                {
+                    "status": "confirmed",
+                    "label": "Shift confirmed",
+                    "description": "Days 16-18 confirm ovulation timing.",
+                },
+            ],
+            "metrics": [
+                {"label": "Coverline", "value": "97.6F"},
+                {"label": "Luteal length", "value": "12d"},
+                {"label": "Phase", "value": "Normal"},
+            ],
+        },
+        "log_today_bbt": {
+            "title": "Log today's BBT",
+            "instructions": "Take immediately upon waking, at the same time every day.",
+            "subtext": "Subtract 0.1F for every 30 minutes after normal wake time.",
+            "input_placeholder": "e.g. 98.1F",
+            "submit_label": "Log",
+            "flags_note": "Flag disturbances - flagged readings are excluded from coverline calculation.",
+            "flags": ["Illness", "Late night", "Alcohol", "Restless sleep"],
+        },
+    }
+
+
+def _fallback_bbt_points() -> list[dict[str, Any]]:
+    values = [
+        97.35, 97.45, 97.32, 97.58, 97.5, 97.43, 97.47, 97.41,
+        97.55, 97.48, 97.52, 97.39, 97.56, 97.44, 97.53, 97.85,
+        98.02, 97.94, 98.12, 98.05, 98.0, 97.86, 97.97, 97.82,
+        97.88, 97.62, 97.51, 97.35,
+    ]
+    points = []
+    for index, temperature in enumerate(values, start=1):
+        point_type = "ovulation" if index == 18 else "normal"
+        points.append({"cycle_day": index, "temperature": temperature, "type": point_type})
+    return points
 def _build_engine_prompt(user_profile: Any, snapshot: Any) -> str:
     context = json.dumps(
         {
