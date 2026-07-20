@@ -42,12 +42,24 @@ Rules:
 - If raw BBT readings are missing, create cautious UI-ready estimates and clearly mark them as estimated.
 - Return valid JSON only. Do not add markdown, code fences, or extra commentary.
 """
+
+OPK_LH_SYSTEM_PROMPT = """You are a careful OPK, LH, and cervical mucus cycle analysis assistant.
+
+Rules:
+- Use only the user profile and health snapshot JSON provided.
+- Do not diagnose, prescribe, or claim medical certainty.
+- Generate the OPK / LH section for a cycle engine UI.
+- If OPK, LH, or cervical mucus logs are missing, create cautious UI-ready estimates and clearly mark missing logs.
+- Return valid JSON only. Do not add markdown, code fences, or extra commentary.
+"""
+
 def fetch_cycle_engine_data() -> dict[str, Any]:
     user_profile = _get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
     snapshot = _get_backend_json(settings.CYCLE_ENGINE_SNAPSHOT_URL)
     engine = _generate_engine_analysis(user_profile, snapshot)
     calendar = _generate_calendar_analysis(user_profile, snapshot)
     bbt = _generate_bbt_analysis(user_profile, snapshot)
+    opk_lh = _generate_opk_lh_analysis(user_profile, snapshot)
 
     return {
         "status": "ready",
@@ -60,6 +72,7 @@ def fetch_cycle_engine_data() -> dict[str, Any]:
         "engine": engine,
         "calendar": calendar,
         "bbt": bbt,
+        "opk_lh": opk_lh,
         "user_profile": user_profile,
         "snapshot": snapshot,
     }
@@ -603,6 +616,314 @@ def _fallback_bbt_points() -> list[dict[str, Any]]:
         point_type = "ovulation" if index == 18 else "normal"
         points.append({"cycle_day": index, "temperature": temperature, "type": point_type})
     return points
+
+def _generate_opk_lh_analysis(user_profile: Any, snapshot: Any) -> dict[str, Any]:
+    prompt = _build_opk_lh_prompt(user_profile, snapshot)
+    response_text = _call_opk_lh_llm(prompt)
+    parsed = _parse_opk_lh_response(response_text)
+    if parsed:
+        return parsed
+    return _fallback_opk_lh_analysis()
+
+
+def _build_opk_lh_prompt(user_profile: Any, snapshot: Any) -> str:
+    context = json.dumps(
+        {
+            "user_profile": user_profile,
+            "snapshot": snapshot,
+        },
+        ensure_ascii=False,
+        default=str,
+    )[:MAX_CONTEXT_CHARS]
+
+    return f"""Generate only the OPK / LH section for a cycle engine UI.
+
+Backend context JSON:
+{context}
+
+Return JSON with exactly this structure:
+{{
+  "info_alert": {{
+    "title": "OPK is forward-looking",
+    "message": "In general, OPK is the only forward-looking exact now signal. A positive LH test means ovulation is expected within 12-36 hours. BBT only confirms ovulation after it has already occurred."
+  }},
+  "testing_window": {{
+    "title": "Testing Window",
+    "subtitle": "Days 10-15 - starts 4 days before predicted ovulation",
+    "status": "Window closed",
+    "cards": [
+      {{"cycle_day": 10, "label": "D10", "result": "not_tested", "symbol": "-"}},
+      {{"cycle_day": 11, "label": "D11", "result": "not_tested", "symbol": "-"}},
+      {{"cycle_day": 12, "label": "D12", "result": "almost", "symbol": "-"}},
+      {{"cycle_day": 13, "label": "D13", "result": "positive", "symbol": "+"}},
+      {{"cycle_day": 14, "label": "D14", "result": "unknown", "symbol": "?"}},
+      {{"cycle_day": 15, "label": "D15", "result": "unknown", "symbol": "?"}}
+    ],
+    "summary": [
+      {{"label": "Window", "value": "Days 10-15"}},
+      {{"label": "OPK peak", "value": "Day 13"}},
+      {{"label": "BBT confirmed", "value": "Day 16"}}
+    ]
+  }},
+  "lh_surge_detection": {{
+    "title": "LH Surge detected on Day 13",
+    "message": "Ovulation was expected Day 14-15. BBT confirmed actual ovulation Day 16, two-day offset noted.",
+    "status": "detected",
+    "surge_day": 13,
+    "expected_ovulation_window": "Day 14-15",
+    "bbt_confirmed_day": 16
+  }},
+  "log_todays_test": {{
+    "title": "Log today's test - Day 17",
+    "guidance": "You are past the main testing window. OPK is less predictive post-ovulation; results here are logged for your record but will not affect this cycle's fertile window prediction.",
+    "options": [
+      {{"label": "Negative", "symbol": "-", "description": "LH not elevated", "state": "negative"}},
+      {{"label": "Almost", "symbol": "-", "description": "LH rising", "state": "almost"}},
+      {{"label": "Positive", "symbol": "+", "description": "LH surge", "state": "positive"}}
+    ]
+  }},
+  "cervical_mucus": {{
+    "title": "Cervical mucus",
+    "description": "Supports OPK - lowest reliability alone, highest combined.",
+    "note": "Egg-white mucus indicates peak fertility signal.",
+    "options": [
+      {{"label": "Dry", "description": "No moisture", "fertility": "Low fertility"}},
+      {{"label": "Sticky", "description": "Thick, crumbly", "fertility": "Low fertility"}},
+      {{"label": "Creamy", "description": "Lotion-like", "fertility": "Moderate"}},
+      {{"label": "Watery", "description": "Clear, thin", "fertility": "High fertility"}},
+      {{"label": "Egg white", "description": "Clear, stretchy", "fertility": "Peak fertility"}}
+    ]
+  }}
+}}
+
+Requirements:
+- Generate testing_window, lh_surge_detection, log_todays_test, and cervical_mucus.
+- Include negative, almost, and positive OPK states.
+- Include cervical mucus choices: Dry, Sticky, Creamy, Watery, Egg white.
+- If OPK/LH logs are missing from backend context, use cautious estimated UI copy and avoid claiming clinical certainty.
+- Keep all strings concise and UI-ready.
+"""
+
+
+def _call_opk_lh_llm(prompt: str) -> str:
+    attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
+
+    for attempt in range(attempts):
+        try:
+            return llm_call(
+                prompt=prompt,
+                system=OPK_LH_SYSTEM_PROMPT,
+                max_tokens=1800,
+            )
+        except Exception as exc:
+            is_last_attempt = attempt == attempts - 1
+            if not _is_retryable_llm_error(exc):
+                raise
+            if is_last_attempt:
+                return ""
+            time.sleep(LLM_RETRY_DELAYS_SECONDS[attempt])
+
+    return ""
+
+
+def _parse_opk_lh_response(text: str) -> dict[str, Any] | None:
+    payload = _parse_json_object(text)
+    if payload is None:
+        return None
+
+    try:
+        return _coerce_opk_lh_payload(payload)
+    except Exception:
+        return None
+
+
+def _coerce_opk_lh_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return _fallback_opk_lh_analysis()
+
+    fallback = _fallback_opk_lh_analysis()
+    return {
+        "info_alert": _coerce_title_message(payload.get("info_alert"), fallback["info_alert"]),
+        "testing_window": _coerce_testing_window(payload.get("testing_window"), fallback["testing_window"]),
+        "lh_surge_detection": _coerce_lh_surge_detection(payload.get("lh_surge_detection"), fallback["lh_surge_detection"]),
+        "log_todays_test": _coerce_log_todays_test(payload.get("log_todays_test"), fallback["log_todays_test"]),
+        "cervical_mucus": _coerce_cervical_mucus(payload.get("cervical_mucus"), fallback["cervical_mucus"]),
+    }
+
+
+def _coerce_title_message(value: Any, fallback: dict[str, str]) -> dict[str, str]:
+    if not isinstance(value, dict):
+        value = {}
+    return {
+        "title": str(value.get("title") or fallback["title"]),
+        "message": str(value.get("message") or fallback["message"]),
+    }
+
+
+def _coerce_testing_window(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    cards = value.get("cards") if isinstance(value.get("cards"), list) else fallback["cards"]
+    summary = value.get("summary") if isinstance(value.get("summary"), list) else fallback["summary"]
+    return {
+        "title": str(value.get("title") or fallback["title"]),
+        "subtitle": str(value.get("subtitle") or fallback["subtitle"]),
+        "status": str(value.get("status") or fallback["status"]),
+        "cards": _coerce_testing_cards(cards, fallback["cards"]),
+        "summary": _coerce_label_value_list(summary, fallback["summary"]),
+    }
+
+
+def _coerce_testing_cards(cards: list[Any], fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    coerced = []
+    for item in cards:
+        if not isinstance(item, dict):
+            continue
+        cycle_day = _bounded_int(item.get("cycle_day"), 10 + len(coerced), 1, 60)
+        coerced.append(
+            {
+                "cycle_day": cycle_day,
+                "label": str(item.get("label") or f"D{cycle_day}"),
+                "result": str(item.get("result") or "unknown"),
+                "symbol": str(item.get("symbol") or "?"),
+            }
+        )
+    return coerced or fallback
+
+
+def _coerce_lh_surge_detection(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    return {
+        "title": str(value.get("title") or fallback["title"]),
+        "message": str(value.get("message") or fallback["message"]),
+        "status": str(value.get("status") or fallback["status"]),
+        "surge_day": _bounded_int(value.get("surge_day"), fallback["surge_day"], 1, 60),
+        "expected_ovulation_window": str(value.get("expected_ovulation_window") or fallback["expected_ovulation_window"]),
+        "bbt_confirmed_day": _bounded_int(value.get("bbt_confirmed_day"), fallback["bbt_confirmed_day"], 1, 60),
+    }
+
+
+def _coerce_log_todays_test(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    options = value.get("options") if isinstance(value.get("options"), list) else fallback["options"]
+    return {
+        "title": str(value.get("title") or fallback["title"]),
+        "guidance": str(value.get("guidance") or fallback["guidance"]),
+        "options": _coerce_opk_options(options, fallback["options"]),
+    }
+
+
+def _coerce_opk_options(options: list[Any], fallback: list[dict[str, str]]) -> list[dict[str, str]]:
+    expected = ["Negative", "Almost", "Positive"]
+    ordered = []
+    for index, label in enumerate(expected):
+        match = _find_named_option(options, label)
+        source = match or fallback[index]
+        ordered.append(
+            {
+                "label": label,
+                "symbol": str(source.get("symbol") or fallback[index]["symbol"]),
+                "description": str(source.get("description") or fallback[index]["description"]),
+                "state": str(source.get("state") or fallback[index]["state"]),
+            }
+        )
+    return ordered
+
+
+def _coerce_cervical_mucus(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    options = value.get("options") if isinstance(value.get("options"), list) else fallback["options"]
+    return {
+        "title": str(value.get("title") or fallback["title"]),
+        "description": str(value.get("description") or fallback["description"]),
+        "note": str(value.get("note") or fallback["note"]),
+        "options": _coerce_mucus_options(options, fallback["options"]),
+    }
+
+
+def _coerce_mucus_options(options: list[Any], fallback: list[dict[str, str]]) -> list[dict[str, str]]:
+    expected = ["Dry", "Sticky", "Creamy", "Watery", "Egg white"]
+    ordered = []
+    for index, label in enumerate(expected):
+        match = _find_named_option(options, label)
+        source = match or fallback[index]
+        ordered.append(
+            {
+                "label": label,
+                "description": str(source.get("description") or fallback[index]["description"]),
+                "fertility": str(source.get("fertility") or fallback[index]["fertility"]),
+            }
+        )
+    return ordered
+
+
+def _find_named_option(options: list[Any], label: str) -> dict[str, Any] | None:
+    expected = _signal_key(label)
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        if _signal_key(str(option.get("label", ""))) == expected:
+            return option
+    return None
+
+
+def _fallback_opk_lh_analysis() -> dict[str, Any]:
+    return {
+        "info_alert": {
+            "title": "OPK is forward-looking",
+            "message": "In general, OPK is the only forward-looking exact now signal. A positive LH test means ovulation is expected within 12-36 hours. BBT only confirms ovulation after it has already occurred.",
+        },
+        "testing_window": {
+            "title": "Testing Window",
+            "subtitle": "Days 10-15 - starts 4 days before predicted ovulation",
+            "status": "Window closed",
+            "cards": [
+                {"cycle_day": 10, "label": "D10", "result": "not_tested", "symbol": "-"},
+                {"cycle_day": 11, "label": "D11", "result": "not_tested", "symbol": "-"},
+                {"cycle_day": 12, "label": "D12", "result": "almost", "symbol": "-"},
+                {"cycle_day": 13, "label": "D13", "result": "positive", "symbol": "+"},
+                {"cycle_day": 14, "label": "D14", "result": "unknown", "symbol": "?"},
+                {"cycle_day": 15, "label": "D15", "result": "unknown", "symbol": "?"},
+            ],
+            "summary": [
+                {"label": "Window", "value": "Days 10-15"},
+                {"label": "OPK peak", "value": "Day 13"},
+                {"label": "BBT confirmed", "value": "Day 16"},
+            ],
+        },
+        "lh_surge_detection": {
+            "title": "LH Surge detected on Day 13",
+            "message": "Ovulation was expected Day 14-15. BBT confirmed actual ovulation Day 16, two-day offset noted.",
+            "status": "detected",
+            "surge_day": 13,
+            "expected_ovulation_window": "Day 14-15",
+            "bbt_confirmed_day": 16,
+        },
+        "log_todays_test": {
+            "title": "Log today's test - Day 17",
+            "guidance": "You are past the main testing window. OPK is less predictive post-ovulation; results here are logged for your record but will not affect this cycle's fertile window prediction.",
+            "options": [
+                {"label": "Negative", "symbol": "-", "description": "LH not elevated", "state": "negative"},
+                {"label": "Almost", "symbol": "-", "description": "LH rising", "state": "almost"},
+                {"label": "Positive", "symbol": "+", "description": "LH surge", "state": "positive"},
+            ],
+        },
+        "cervical_mucus": {
+            "title": "Cervical mucus",
+            "description": "Supports OPK - lowest reliability alone, highest combined.",
+            "note": "Egg-white mucus indicates peak fertility signal.",
+            "options": [
+                {"label": "Dry", "description": "No moisture", "fertility": "Low fertility"},
+                {"label": "Sticky", "description": "Thick, crumbly", "fertility": "Low fertility"},
+                {"label": "Creamy", "description": "Lotion-like", "fertility": "Moderate"},
+                {"label": "Watery", "description": "Clear, thin", "fertility": "High fertility"},
+                {"label": "Egg white", "description": "Clear, stretchy", "fertility": "Peak fertility"},
+            ],
+        },
+    }
 def _build_engine_prompt(user_profile: Any, snapshot: Any) -> str:
     context = json.dumps(
         {
