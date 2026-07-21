@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     SKIN_SCANS_URL: str = "https://hard-hulky-diane.ngrok-free.dev/api/v1/skin-scans"
     CYCLE_ENGINE_PROFILE_URL: str = "https://overapprehensive-optatively-meri.ngrok-free.dev/api/v1/user-profile"
     CYCLE_ENGINE_SNAPSHOT_URL: str = "https://overapprehensive-optatively-meri.ngrok-free.dev/api/v1/snapshot/3"
+    HEALTH_TRENDS_HEALTH_LOGS_URL: str = "https://overapprehensive-optatively-meri.ngrok-free.dev/api/v1/health-logs"
     CYCLE_ENGINE_ACCESS_TOKEN: str = ""
     BACKEND_REFRESH_TOKEN: str = ""
     CLAUDE_API_KEY: str = ""
