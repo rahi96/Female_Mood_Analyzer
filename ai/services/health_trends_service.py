@@ -26,18 +26,25 @@ Rules:
 
 
 def fetch_health_trends_data() -> dict[str, Any]:
-    user_profile = _get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
-    health_logs = _get_backend_json(settings.HEALTH_TRENDS_HEALTH_LOGS_URL)
+    user_profile, profile_error = _try_get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
+    health_logs, health_logs_error = _try_get_backend_json(settings.HEALTH_TRENDS_HEALTH_LOGS_URL)
+    backend_errors = {}
+    if profile_error:
+        backend_errors["user_profile"] = profile_error
+    if health_logs_error:
+        backend_errors["health_logs"] = health_logs_error
+
     health_trends = _generate_health_trends_analysis(user_profile, health_logs)
 
     return {
         "status": "ready",
         "service": "health_trends",
-        "fetched": True,
+        "fetched": not backend_errors,
         "sources": {
             "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
             "health_logs": settings.HEALTH_TRENDS_HEALTH_LOGS_URL,
         },
+        "backend_errors": backend_errors,
         "health_trends": health_trends,
         "user_profile": user_profile,
         "health_logs": health_logs,
@@ -424,6 +431,13 @@ def _bounded_float(value: Any, default: float, minimum: float, maximum: float) -
     except (TypeError, ValueError):
         number = default
     return max(minimum, min(maximum, round(number, 2)))
+
+
+def _try_get_backend_json(url: str) -> tuple[Any | None, str | None]:
+    try:
+        return _get_backend_json(url), None
+    except Exception as exc:
+        return None, str(exc)
 
 
 def _get_backend_json(url: str) -> Any:
