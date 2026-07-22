@@ -25,7 +25,7 @@ Rules:
 """
 
 
-def fetch_health_trends_data() -> dict[str, Any]:
+def fetch_health_trends_data(period: str = "7d") -> dict[str, Any]:
     user_profile, profile_error = _try_get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
     health_logs, health_logs_error = _try_get_backend_json(settings.HEALTH_TRENDS_HEALTH_LOGS_URL)
     backend_errors = {}
@@ -34,7 +34,8 @@ def fetch_health_trends_data() -> dict[str, Any]:
     if health_logs_error:
         backend_errors["health_logs"] = health_logs_error
 
-    health_trends = _generate_health_trends_analysis(user_profile, health_logs)
+    normalized_period = _normalize_period(period)
+    health_trends = _select_period_response(_generate_health_trends_analysis(user_profile, health_logs), normalized_period)
 
     return {
         "status": "ready",
@@ -45,6 +46,7 @@ def fetch_health_trends_data() -> dict[str, Any]:
             "health_logs": settings.HEALTH_TRENDS_HEALTH_LOGS_URL,
         },
         "backend_errors": backend_errors,
+        "period": normalized_period,
         "health_trends": health_trends,
         "user_profile": user_profile,
         "health_logs": health_logs,
@@ -58,6 +60,34 @@ def _generate_health_trends_analysis(user_profile: Any, health_logs: Any) -> dic
     if parsed:
         return parsed
     return _fallback_health_trends_analysis()
+
+def _normalize_period(period: str) -> str:
+    if period not in {"7d", "30d"}:
+        return "7d"
+    return period
+
+
+def _select_period_response(health_trends: dict[str, Any], period: str) -> dict[str, Any]:
+    selected_key = "seven_days" if period == "7d" else "thirty_days"
+    selected = health_trends.get(selected_key)
+    fallback = _fallback_health_trends_analysis().get(selected_key)
+    if not isinstance(selected, dict):
+        selected = fallback
+
+    range_options = [
+        {"label": "7d", "selected": period == "7d"},
+        {"label": "30d", "selected": period == "30d"},
+    ]
+
+    return {
+        "title": str(health_trends.get("title") or "Health Trends"),
+        "selected_period": period,
+        "available_periods": ["7d", "30d"],
+        "range_options": range_options,
+        "sleep_energy_correlation_chart": selected["sleep_energy_correlation_chart"],
+        "sleep_energy_correlation_diagram": selected["sleep_energy_correlation_diagram"],
+        "hormone_mood": selected["hormone_mood"],
+    }
 
 
 def _build_health_trends_prompt(user_profile: Any, health_logs: Any) -> str:
