@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnableLambda
+import httpx
 
 from ai.config import settings
 from ai.models.chat_models import (
@@ -24,6 +25,7 @@ from ai.models.chat_models import (
     TemperatureStats,
 )
 from ai.services.cycle_service import fetch_backend_data, fetch_subscription
+from ai.services.pdf_summary_service import fetch_chat_lab_report_context
 from ai.utils.llm_call import llm_call
 
 
@@ -43,13 +45,15 @@ You are a Health Data Analysis Assistant, designed to help users understand thei
 - Be empathetic, clear, and professional in all responses
 
 ## Data Context
-You have access to the user's complete health profile through the user_data variable, which includes:
+You have access to the user's complete health profile through the user_data variable, which may include:
 - Temperature logs and patterns
 - Onboarding information
 - Historical health metrics
-- Any relevant medical tracking data
+- Health logs, profile, snapshot, and relevant medical tracking data
+- lab_report_context when the user asks about lab reports, PDFs, hormones, or bloodwork
 
 CRITICAL: Always reference the actual data provided. Never make assumptions about data you haven't seen.
+If lab_report_context is present, use the extracted PDF text as the highest-priority source for lab values and hormone results. If lab_report_context is unavailable or text_extracted is false, say the report text was not available.
 
 ## Response Guidelines
 
@@ -168,13 +172,109 @@ CHAT_PROMPT = PromptTemplate.from_template(CHAT_MESSAGE_TEMPLATE)
 MEMORY_SUMMARY_PROMPT = PromptTemplate.from_template(MEMORY_SUMMARY_TEMPLATE)
 
 
+def _fetch_chat_user_data(user_id: str, user_message: str) -> dict[str, Any]:
+    try:
+        user_data = {
+            "source": "legacy_temperature_backend",
+            "legacy_temperature_data": fetch_backend_data(user_id),
+        }
+    except Exception as exc:
+        fallback_data, fallback_errors = _fetch_current_backend_context()
+        fallback_data["source"] = "current_backend_context"
+        fallback_data["legacy_temperature_error"] = str(exc)
+        fallback_data["backend_errors"] = fallback_errors
+        user_data = fallback_data
+
+    if _should_include_lab_report_context(user_message):
+        lab_report_context, lab_report_error = _fetch_lab_report_context()
+        user_data["lab_report_context"] = lab_report_context
+        if lab_report_error:
+            backend_errors = user_data.setdefault("backend_errors", {})
+            if isinstance(backend_errors, dict):
+                backend_errors["lab_report"] = lab_report_error
+
+    return user_data
+
+
+def _should_include_lab_report_context(message: str) -> bool:
+    normalized = message.lower()
+    markers = (
+        "lab",
+        "report",
+        "pdf",
+        "hormone",
+        "hormonal",
+        "estradiol",
+        "cortisol",
+        "progesterone",
+        "fsh",
+        "lh",
+        "bloodwork",
+        "blood work",
+        "result",
+        "results",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _fetch_lab_report_context() -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        return fetch_chat_lab_report_context(), None
+    except Exception as exc:
+        return None, str(exc)
+
+def _fetch_current_backend_context() -> tuple[dict[str, Any], dict[str, str]]:
+    sources = {
+        "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
+        "health_logs": settings.HEALTH_TRENDS_HEALTH_LOGS_URL,
+        "cycle_snapshot": settings.CYCLE_ENGINE_SNAPSHOT_URL,
+    }
+    data: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    for name, url in sources.items():
+        payload, error = _try_get_backend_json(url)
+        data[name] = payload
+        if error:
+            errors[name] = error
+    return data, errors
+
+
+def _try_get_backend_json(url: str) -> tuple[Any | None, str | None]:
+    try:
+        response = httpx.get(
+            url,
+            headers=_current_backend_headers(),
+            timeout=30.0,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "")
+        if "json" not in content_type.lower():
+            raise ValueError(f"Backend route did not return JSON: {url}")
+        return response.json(), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _current_backend_headers() -> dict[str, str]:
+    token = settings.CYCLE_ENGINE_ACCESS_TOKEN or settings.BACKEND_ACCESS_TOKEN
+    headers = {
+        "Accept": "application/json",
+        "ngrok-skip-browser-warning": "true",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["access-token"] = token
+        headers["x-access-token"] = token
+    return headers
+
 def generate_chat_response(request: ChatResponseRequest) -> ChatResponse:
     session_id = request.session_id or str(uuid4())
     timestamp = _utc_timestamp()
 
     _enforce_chat_quota(request.user_id)
 
-    user_data = fetch_backend_data(request.user_id)
+    user_data = _fetch_chat_user_data(request.user_id, request.message)
     history = _get_history(request.user_id, session_id)
     long_term_memory = _get_long_term_memory(request.user_id)
 

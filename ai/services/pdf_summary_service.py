@@ -22,6 +22,7 @@ from ai.utils.llm_call import llm_call
 RETRYABLE_LLM_STATUS_CODES = {429, 500, 502, 503, 529}
 LLM_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 MAX_PDF_TEXT_CHARS = 18000
+MAX_CHAT_PDF_TEXT_CHARS = 12000
 NEEDS_ATTENTION_BIOMARKERS = ("Estradiol (E2)", "Cortisol AM")
 NORMAL_RESULT_BIOMARKERS = ("Progesterone", "FSH", "LH")
 
@@ -51,6 +52,21 @@ def summarize_pdf(request: PdfSummaryRequest | None = None) -> PdfSummaryRespons
         text_extracted=bool(report_text.strip()),
         summary=summary,
     )
+
+def fetch_chat_lab_report_context(report_id: int | None = None) -> dict[str, Any]:
+    pdf_content, content_type, source, resolved_report_id = fetch_backend_pdf(report_id)
+    report_text = _extract_pdf_text(pdf_content)
+    clipped_text = report_text[:MAX_CHAT_PDF_TEXT_CHARS]
+    return {
+        "report_id": resolved_report_id,
+        "source_path": source,
+        "content_type": content_type,
+        "file_size_bytes": len(pdf_content),
+        "text_extracted": bool(report_text.strip()),
+        "extracted_text_characters": len(report_text),
+        "extracted_text_truncated": len(report_text) > MAX_CHAT_PDF_TEXT_CHARS,
+        "extracted_text": clipped_text,
+    }
 
 
 def fetch_backend_pdf(report_id: int | None = None) -> tuple[bytes, str, str, int | None]:
@@ -361,10 +377,11 @@ def _backend_headers() -> dict[str, str]:
         "ngrok-skip-browser-warning": "true",
     }
 
-    if settings.BACKEND_ACCESS_TOKEN:
-        headers["Authorization"] = f"Bearer {settings.BACKEND_ACCESS_TOKEN}"
-        headers["access-token"] = settings.BACKEND_ACCESS_TOKEN
-        headers["x-access-token"] = settings.BACKEND_ACCESS_TOKEN
+    token = settings.CYCLE_ENGINE_ACCESS_TOKEN or settings.BACKEND_ACCESS_TOKEN
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["access-token"] = token
+        headers["x-access-token"] = token
 
     return headers
 
