@@ -43,6 +43,11 @@ def analyze_skin_scan() -> SkinScanResponse:
     )
 
 
+def analyze_live_skin_scan(image_bytes: bytes, content_type: str = "image/jpeg") -> SkinScanMetrics:
+    if not image_bytes:
+        raise ValueError("Live skin scan image data is required")
+    return _generate_skin_metrics(image_bytes, content_type)
+
 def fetch_backend_skin_scan() -> tuple[dict[str, Any], bytes, str]:
     response = _get_backend_response(settings.SKIN_SCANS_URL)
     content_type = response.headers.get("content-type", "application/octet-stream")
