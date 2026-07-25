@@ -144,7 +144,7 @@ def _generate_skin_metrics(
 
 def _build_skin_scan_prompt(context: dict[str, Any] | None = None) -> str:
     context_json = _skin_scan_context_json(context)
-    return f"""Analyze this skin scan image and generate this exact JSON shape:
+    base_prompt = """Analyze this skin scan image and generate this exact JSON shape:
 {
   "overall_score": 80,
   "hydration_score": 72,
@@ -172,8 +172,8 @@ Requirements:
 - Do not claim exact sleep, water, wearable, cycle, or lifestyle correlations unless those data are explicitly provided.
 
 Backend wellness context JSON:
-{context_json}
 """
+    return f"{base_prompt}{context_json}"
 
 
 def _call_skin_scan_llm(image_bytes: bytes, media_type: str, prompt: str) -> str:
