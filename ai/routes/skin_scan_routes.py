@@ -1,6 +1,7 @@
 import base64
 import binascii
 import json
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
@@ -88,7 +89,7 @@ def _is_ping_message(message: dict[str, Any]) -> bool:
 def _extract_live_image_message(message: dict[str, Any]) -> tuple[bytes, str, str | None]:
     binary = message.get("bytes")
     if binary:
-        return binary, "image/jpeg", None
+        return binary, _detect_image_content_type(binary, "image/jpeg"), None
 
     text = message.get("text")
     if not text:
@@ -123,25 +124,56 @@ def _parse_text_payload(text: str) -> Any:
 
 
 def _decode_base64_image(value: str, content_type: str, frame_id: str | None) -> tuple[bytes, str, str | None]:
-    image_value = value.strip()
+    image_value = value.strip().strip('"')
     detected_content_type = content_type
 
-    if image_value.startswith("data:"):
+    if image_value.startswith(("blob:", "http://", "https://")):
+        raise ValueError(
+            "Send the actual JPEG bytes or base64/data URL content, not a blob URL, file path, or remote URL"
+        )
+
+    if image_value.startswith("data:") or ("," in image_value and "base64" in image_value.split(",", 1)[0].lower()):
         header, _, encoded = image_value.partition(",")
         if not encoded:
             raise ValueError("Data URL image payload is missing base64 data")
         detected_content_type = _content_type_from_data_url(header) or content_type
         image_value = encoded
 
+    compact_value = re.sub(r"\s+", "", image_value)
+    padded_value = compact_value + ("=" * (-len(compact_value) % 4))
+
     try:
-        image_bytes = base64.b64decode(image_value, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ValueError("Image payload must be valid base64") from exc
+        image_bytes = base64.b64decode(padded_value, validate=True)
+    except (binascii.Error, ValueError):
+        try:
+            image_bytes = base64.urlsafe_b64decode(padded_value)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(
+                "Image payload must be valid base64. Send JPEG as a binary WebSocket frame or as image_base64/data URL."
+            ) from exc
 
     if not image_bytes:
         raise ValueError("Decoded image payload is empty")
+    if not _looks_like_supported_image(image_bytes):
+        raise ValueError("Decoded image payload is not a supported JPEG, PNG, WebP, or GIF image")
 
-    return image_bytes, _safe_image_content_type(detected_content_type), frame_id
+    return image_bytes, _detect_image_content_type(image_bytes, detected_content_type), frame_id
+
+
+def _detect_image_content_type(image_bytes: bytes, fallback: str) -> str:
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes.startswith(b"\x89PNG"):
+        return "image/png"
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if image_bytes.startswith(b"GIF"):
+        return "image/gif"
+    return _safe_image_content_type(fallback)
+
+
+def _looks_like_supported_image(image_bytes: bytes) -> bool:
+    return _detect_image_content_type(image_bytes, "") in {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 
 def _content_type_from_data_url(header: str) -> str | None:
