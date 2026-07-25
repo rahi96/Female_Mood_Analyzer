@@ -1,6 +1,7 @@
 import base64
 import json
 import time
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -15,6 +16,7 @@ from ai.utils.llm_response_parser import LLMResponseParser
 RETRYABLE_LLM_STATUS_CODES = {429, 500, 502, 503, 529}
 LLM_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+MAX_CONTEXT_CHARS = 6000
 
 
 SKIN_SCAN_SYSTEM_PROMPT = """You are a careful cosmetic skin image analysis assistant for a wellness app.
@@ -43,10 +45,59 @@ def analyze_skin_scan() -> SkinScanResponse:
     )
 
 
-def analyze_live_skin_scan(image_bytes: bytes, content_type: str = "image/jpeg") -> SkinScanMetrics:
+def analyze_live_skin_scan(
+    image_bytes: bytes,
+    content_type: str = "image/jpeg",
+    context: dict[str, Any] | None = None,
+) -> SkinScanMetrics:
     if not image_bytes:
         raise ValueError("Live skin scan image data is required")
-    return _generate_skin_metrics(image_bytes, content_type)
+    return _generate_skin_metrics(image_bytes, content_type, context)
+
+
+def fetch_skin_scan_context() -> tuple[dict[str, Any], dict[str, str]]:
+    sources = {
+        "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
+        "health_logs": settings.HEALTH_TRENDS_HEALTH_LOGS_URL,
+    }
+    context: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+
+    for name, url in sources.items():
+        payload, error = _try_get_backend_json(url)
+        context[name] = payload
+        if error:
+            errors[name] = error
+
+    return context, errors
+
+
+def extract_skin_scan_user_id(context: dict[str, Any] | None) -> int | None:
+    if not context:
+        return None
+
+    user_profile = context.get("user_profile")
+    for record in _walk_dicts(user_profile):
+        user_id = _optional_int(record.get("user_id"))
+        if user_id is not None:
+            return user_id
+
+        if any(key in record for key in ("full_name", "email", "user_type", "onboardingCompleted")):
+            direct_id = _optional_int(record.get("id"))
+            if direct_id is not None:
+                return direct_id
+
+        nested_user = record.get("user")
+        if isinstance(nested_user, dict):
+            nested_id = _optional_int(nested_user.get("id") or nested_user.get("user_id"))
+            if nested_id is not None:
+                return nested_id
+
+    return None
+
+
+def skin_scan_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 def fetch_skin_scan_image_from_url(image_url: str) -> tuple[bytes, str]:
     response = _get_backend_response(image_url)
@@ -78,8 +129,12 @@ def fetch_backend_skin_scan() -> tuple[dict[str, Any], bytes, str]:
     return record, image_response.content, image_content_type
 
 
-def _generate_skin_metrics(image_bytes: bytes, content_type: str) -> SkinScanMetrics:
-    prompt = _build_skin_scan_prompt()
+def _generate_skin_metrics(
+    image_bytes: bytes,
+    content_type: str,
+    context: dict[str, Any] | None = None,
+) -> SkinScanMetrics:
+    prompt = _build_skin_scan_prompt(context)
     response_text = _call_skin_scan_llm(image_bytes, _image_media_type(content_type), prompt)
     parsed = _parse_skin_metrics(response_text)
     if parsed:
@@ -87,8 +142,9 @@ def _generate_skin_metrics(image_bytes: bytes, content_type: str) -> SkinScanMet
     return _fallback_skin_metrics()
 
 
-def _build_skin_scan_prompt() -> str:
-    return """Analyze this skin scan image and generate this exact JSON shape:
+def _build_skin_scan_prompt(context: dict[str, Any] | None = None) -> str:
+    context_json = _skin_scan_context_json(context)
+    return f"""Analyze this skin scan image and generate this exact JSON shape:
 {
   "overall_score": 80,
   "hydration_score": 72,
@@ -111,7 +167,12 @@ Requirements:
 - All score fields must be integers from 0 to 100.
 - Make neumera_insight concise, practical, and non-medical.
 - If only the image is available, base neumera_insight only on visible skin appearance and general skincare habits.
+- Use backend wellness context only when it is present in the JSON below.
+- You may reference user profile or health-log context in neumera_insight, but keep it cautious and non-medical.
 - Do not claim exact sleep, water, wearable, cycle, or lifestyle correlations unless those data are explicitly provided.
+
+Backend wellness context JSON:
+{context_json}
 """
 
 
@@ -229,6 +290,39 @@ def _fallback_skin_metrics() -> SkinScanMetrics:
         ),
     )
 
+
+
+def _skin_scan_context_json(context: dict[str, Any] | None) -> str:
+    if not context:
+        return "{}"
+    return json.dumps(context, ensure_ascii=False, default=str)[:MAX_CONTEXT_CHARS]
+
+
+def _try_get_backend_json(url: str) -> tuple[Any | None, str | None]:
+    try:
+        response = httpx.get(
+            url,
+            headers=_backend_headers(),
+            timeout=30.0,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "")
+        if "json" not in content_type.lower():
+            raise ValueError(f"Backend route did not return JSON: {url}")
+        return response.json(), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _walk_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_dicts(item)
 
 def _extract_skin_scan_record(payload: Any) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []

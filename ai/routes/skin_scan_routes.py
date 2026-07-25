@@ -9,7 +9,10 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, W
 from ai.models.skin_scan_models import SkinScanResponse
 from ai.services.skin_scan_service import (
     analyze_live_skin_scan,
+    extract_skin_scan_user_id,
+    fetch_skin_scan_context,
     fetch_skin_scan_image_from_url,
+    skin_scan_timestamp,
 )
 
 
@@ -35,8 +38,16 @@ async def skin_scan_endpoint(
             image=image,
             content_type=content_type,
         )
-        metrics = analyze_live_skin_scan(image_bytes, detected_content_type)
-        return SkinScanResponse(image_path=source_path, **metrics.model_dump())
+        context, _ = fetch_skin_scan_context()
+        metrics = analyze_live_skin_scan(image_bytes, detected_content_type, context=context)
+        timestamp = skin_scan_timestamp()
+        return SkinScanResponse(
+            user_id=extract_skin_scan_user_id(context),
+            image_path=source_path,
+            created_at=timestamp,
+            updated_at=timestamp,
+            **metrics.model_dump(),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -115,15 +126,30 @@ async def skin_scan_live_websocket(websocket: WebSocket):
                 await websocket.send_json({"type": "pong", "success": True})
                 continue
 
-            image_bytes, content_type, frame_id = _extract_live_image_message(message)
-            metrics = analyze_live_skin_scan(image_bytes, content_type)
+            image_bytes, content_type, frame_id, source_path = _extract_live_image_message(message)
+            context, _ = fetch_skin_scan_context()
+            metrics = analyze_live_skin_scan(image_bytes, content_type, context=context)
+            timestamp = skin_scan_timestamp()
+            scan_response = SkinScanResponse(
+                user_id=extract_skin_scan_user_id(context),
+                image_path=source_path,
+                created_at=timestamp,
+                updated_at=timestamp,
+                **metrics.model_dump(),
+            )
             await websocket.send_json(
                 {
                     "type": "skin_scan_result",
                     "success": True,
                     "frame_id": frame_id,
                     "content_type": content_type,
+                    "id": scan_response.id,
+                    "user_id": scan_response.user_id,
+                    "image_path": scan_response.image_path,
+                    "created_at": scan_response.created_at,
+                    "updated_at": scan_response.updated_at,
                     "metrics": metrics.model_dump(),
+                    "scan": scan_response.model_dump(),
                 }
             )
         except WebSocketDisconnect:
@@ -168,10 +194,10 @@ def _is_ping_message(message: dict[str, Any]) -> bool:
     return isinstance(payload, dict) and str(payload.get("type", "")).lower() == "ping"
 
 
-def _extract_live_image_message(message: dict[str, Any]) -> tuple[bytes, str, str | None]:
+def _extract_live_image_message(message: dict[str, Any]) -> tuple[bytes, str, str | None, str]:
     binary = message.get("bytes")
     if binary:
-        return binary, _detect_image_content_type(binary, "image/jpeg"), None
+        return binary, _detect_image_content_type(binary, "image/jpeg"), None, "websocket-binary"
 
     text = message.get("text")
     if not text:
@@ -184,7 +210,7 @@ def _extract_live_image_message(message: dict[str, Any]) -> tuple[bytes, str, st
         image_url = _image_url_from_payload(payload)
         if image_url:
             image_bytes, fetched_content_type = fetch_skin_scan_image_from_url(image_url)
-            return image_bytes, fetched_content_type, frame_id
+            return image_bytes, fetched_content_type, frame_id, image_url
 
         image_value = (
             payload.get("image_base64")
@@ -194,9 +220,11 @@ def _extract_live_image_message(message: dict[str, Any]) -> tuple[bytes, str, st
         )
         if not isinstance(image_value, str):
             raise ValueError("JSON payload must include image_url, image_base64, image, frame, or data")
-        return _decode_base64_image(image_value, content_type, frame_id)
+        image_bytes, detected_content_type, _ = _decode_base64_image(image_value, content_type, frame_id)
+        return image_bytes, detected_content_type, frame_id, frame_id or "websocket-base64"
 
-    return _decode_base64_image(str(payload), "image/jpeg", None)
+    image_bytes, detected_content_type, _ = _decode_base64_image(str(payload), "image/jpeg", None)
+    return image_bytes, detected_content_type, None, "websocket-base64"
 
 def _image_url_from_payload(payload: dict[str, Any]) -> str | None:
     for key in ("image_url", "image_path", "url"):
