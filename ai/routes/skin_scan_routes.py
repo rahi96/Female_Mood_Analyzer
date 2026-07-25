@@ -20,6 +20,7 @@ router = APIRouter()
 async def skin_scan_endpoint(
     request: Request,
     file: UploadFile | None = File(default=None),
+    file_upper: UploadFile | None = File(default=None, alias="File"),
     image_url: str | None = Form(default=None),
     image_base64: str | None = Form(default=None),
     image: str | None = Form(default=None),
@@ -28,7 +29,7 @@ async def skin_scan_endpoint(
     try:
         image_bytes, detected_content_type, source_path = await _extract_post_skin_scan_image(
             request=request,
-            file=file,
+            file=file or file_upper,
             image_url=image_url,
             image_base64=image_base64,
             image=image,
