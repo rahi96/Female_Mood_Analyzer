@@ -4,12 +4,11 @@ import json
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 
 from ai.models.skin_scan_models import SkinScanResponse
 from ai.services.skin_scan_service import (
     analyze_live_skin_scan,
-    analyze_skin_scan,
     fetch_skin_scan_image_from_url,
 )
 
@@ -18,11 +17,75 @@ router = APIRouter()
 
 
 @router.post("/skin-scan", response_model=SkinScanResponse)
-async def skin_scan_endpoint():
+async def skin_scan_endpoint(
+    request: Request,
+    file: UploadFile | None = File(default=None),
+    image_url: str | None = Form(default=None),
+    image_base64: str | None = Form(default=None),
+    image: str | None = Form(default=None),
+    content_type: str | None = Form(default=None),
+):
     try:
-        return analyze_skin_scan()
+        image_bytes, detected_content_type, source_path = await _extract_post_skin_scan_image(
+            request=request,
+            file=file,
+            image_url=image_url,
+            image_base64=image_base64,
+            image=image,
+            content_type=content_type,
+        )
+        metrics = analyze_live_skin_scan(image_bytes, detected_content_type)
+        return SkinScanResponse(image_path=source_path, **metrics.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Skin scan analysis failed: {exc}")
+
+
+async def _extract_post_skin_scan_image(
+    request: Request,
+    file: UploadFile | None,
+    image_url: str | None,
+    image_base64: str | None,
+    image: str | None,
+    content_type: str | None,
+) -> tuple[bytes, str, str]:
+    if file is not None:
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise ValueError("Uploaded skin scan file is empty")
+        if not _looks_like_supported_image(file_bytes):
+            raise ValueError("Uploaded file is not a supported JPEG, PNG, WebP, or GIF image")
+        return file_bytes, _detect_image_content_type(file_bytes, file.content_type or content_type or "image/jpeg"), file.filename or "uploaded-file"
+
+    json_payload = await _read_optional_json_payload(request)
+    image_url = image_url or _optional_str(json_payload.get("image_url") or json_payload.get("image_path") or json_payload.get("url"))
+    image_base64 = image_base64 or _optional_str(json_payload.get("image_base64"))
+    image = image or _optional_str(json_payload.get("image") or json_payload.get("data") or json_payload.get("frame"))
+    content_type = content_type or _optional_str(json_payload.get("content_type") or json_payload.get("mime_type"))
+
+    payload: dict[str, Any] = {
+        "image_url": image_url,
+        "image_base64": image_base64,
+        "image": image,
+        "content_type": content_type or "image/jpeg",
+    }
+
+    normalized_url = _image_url_from_payload(payload)
+    if normalized_url:
+        image_bytes, fetched_content_type = fetch_skin_scan_image_from_url(normalized_url)
+        return image_bytes, fetched_content_type, normalized_url
+
+    image_value = image_base64 or image
+    if isinstance(image_value, str) and image_value.strip():
+        image_bytes, detected_content_type, _ = _decode_base64_image(
+            image_value,
+            content_type or "image/jpeg",
+            None,
+        )
+        return image_bytes, detected_content_type, "uploaded-base64"
+
+    raise ValueError("Send a skin image as form-data file, image_url, image_base64, or image data URL")
 
 
 @router.websocket("/skin-scan-ws")
@@ -72,6 +135,19 @@ async def skin_scan_live_websocket(websocket: WebSocket):
                     "detail": str(exc),
                 }
             )
+
+
+async def _read_optional_json_payload(request: Request) -> dict[str, Any]:
+    content_type = request.headers.get("content-type", "").lower()
+    if "application/json" not in content_type:
+        return {}
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
 
 
 def _is_ping_message(message: dict[str, Any]) -> bool:
@@ -132,6 +208,7 @@ def _image_url_from_payload(payload: dict[str, Any]) -> str | None:
         return image_value.strip()
 
     return None
+
 
 def _parse_text_payload(text: str) -> Any:
     cleaned = text.strip()
@@ -194,7 +271,12 @@ def _detect_image_content_type(image_bytes: bytes, fallback: str) -> str:
 
 
 def _looks_like_supported_image(image_bytes: bytes) -> bool:
-    return _detect_image_content_type(image_bytes, "") in {"image/jpeg", "image/png", "image/webp", "image/gif"}
+    return (
+        image_bytes.startswith(b"\xff\xd8\xff")
+        or image_bytes.startswith(b"\x89PNG")
+        or (image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP")
+        or image_bytes.startswith(b"GIF")
+    )
 
 
 def _content_type_from_data_url(header: str) -> str | None:
