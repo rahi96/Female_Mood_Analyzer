@@ -5,6 +5,7 @@ from ai.routes import cycle_routes
 from ai.routes import cycle_awareness_routes
 from ai.routes import daily_scripture_routes
 from ai.routes import cycle_engine_routes
+from ai.routes import cycle_engine_v1_routes
 from ai.routes import health_trends_routes
 from ai.routes import numera_insight_routes
 from ai.routes import summarize_pdf_routes
@@ -20,6 +21,11 @@ app = FastAPI(
 
 app.include_router(cycle_routes.router, prefix="/api", tags=["App_api's"])
 app.include_router(cycle_engine_routes.router, prefix="/api", tags=["Cycle_engine_api's"])
+app.include_router(
+    cycle_engine_v1_routes.router,
+    prefix="/api/v1/cycle-engine",
+    tags=["Cycle_engine_v1"],
+)
 app.include_router(cycle_awareness_routes.router, prefix="/api", tags=["Cycle_awareness_api's"])
 app.include_router(health_trends_routes.router, prefix="/api", tags=["Health_trends_api's"])
 app.include_router(daily_scripture_routes.router, prefix="/api", tags=["Daily_scripture_api's"])
