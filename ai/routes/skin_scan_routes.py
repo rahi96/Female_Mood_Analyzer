@@ -7,7 +7,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from ai.models.skin_scan_models import SkinScanResponse
-from ai.services.skin_scan_service import analyze_live_skin_scan, analyze_skin_scan
+from ai.services.skin_scan_service import (
+    analyze_live_skin_scan,
+    analyze_skin_scan,
+    fetch_skin_scan_image_from_url,
+)
 
 
 router = APIRouter()
@@ -21,6 +25,7 @@ async def skin_scan_endpoint():
         raise HTTPException(status_code=500, detail=f"Skin scan analysis failed: {exc}")
 
 
+@router.websocket("/skin-scan-ws")
 @router.websocket("/skin-scan/live")
 async def skin_scan_live_websocket(websocket: WebSocket):
     await websocket.accept()
@@ -28,7 +33,7 @@ async def skin_scan_live_websocket(websocket: WebSocket):
         {
             "type": "skin_scan_ready",
             "success": True,
-            "message": "Send a camera frame as binary image data or JSON with image_base64/image/data.",
+            "message": "Send camera image bytes, base64/data URL, or JSON with image_url.",
         }
     )
 
@@ -97,20 +102,36 @@ def _extract_live_image_message(message: dict[str, Any]) -> tuple[bytes, str, st
 
     payload = _parse_text_payload(text)
     if isinstance(payload, dict):
+        content_type = str(payload.get("content_type") or payload.get("mime_type") or "image/jpeg")
+        frame_id = _optional_str(payload.get("frame_id") or payload.get("id"))
+        image_url = _image_url_from_payload(payload)
+        if image_url:
+            image_bytes, fetched_content_type = fetch_skin_scan_image_from_url(image_url)
+            return image_bytes, fetched_content_type, frame_id
+
         image_value = (
             payload.get("image_base64")
             or payload.get("image")
             or payload.get("frame")
             or payload.get("data")
         )
-        content_type = str(payload.get("content_type") or payload.get("mime_type") or "image/jpeg")
-        frame_id = _optional_str(payload.get("frame_id") or payload.get("id"))
         if not isinstance(image_value, str):
-            raise ValueError("JSON payload must include image_base64, image, frame, or data")
+            raise ValueError("JSON payload must include image_url, image_base64, image, frame, or data")
         return _decode_base64_image(image_value, content_type, frame_id)
 
     return _decode_base64_image(str(payload), "image/jpeg", None)
 
+def _image_url_from_payload(payload: dict[str, Any]) -> str | None:
+    for key in ("image_url", "image_path", "url"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    image_value = payload.get("image")
+    if isinstance(image_value, str) and image_value.strip().startswith(("http://", "https://", "/storage/")):
+        return image_value.strip()
+
+    return None
 
 def _parse_text_payload(text: str) -> Any:
     cleaned = text.strip()

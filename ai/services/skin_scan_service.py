@@ -48,6 +48,14 @@ def analyze_live_skin_scan(image_bytes: bytes, content_type: str = "image/jpeg")
         raise ValueError("Live skin scan image data is required")
     return _generate_skin_metrics(image_bytes, content_type)
 
+def fetch_skin_scan_image_from_url(image_url: str) -> tuple[bytes, str]:
+    response = _get_backend_response(image_url)
+    content_type = response.headers.get("content-type", "application/octet-stream")
+    if not _is_image_response(content_type, response.content):
+        raise ValueError("Skin scan image URL did not return an image file")
+    return response.content, content_type
+
+
 def fetch_backend_skin_scan() -> tuple[dict[str, Any], bytes, str]:
     response = _get_backend_response(settings.SKIN_SCANS_URL)
     content_type = response.headers.get("content-type", "application/octet-stream")
@@ -284,10 +292,11 @@ def _backend_headers() -> dict[str, str]:
         "ngrok-skip-browser-warning": "true",
     }
 
-    if settings.BACKEND_ACCESS_TOKEN:
-        headers["Authorization"] = f"Bearer {settings.BACKEND_ACCESS_TOKEN}"
-        headers["access-token"] = settings.BACKEND_ACCESS_TOKEN
-        headers["x-access-token"] = settings.BACKEND_ACCESS_TOKEN
+    token = settings.CYCLE_ENGINE_ACCESS_TOKEN or settings.BACKEND_ACCESS_TOKEN
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["access-token"] = token
+        headers["x-access-token"] = token
 
     return headers
 
@@ -312,14 +321,23 @@ def _backend_url(path: str) -> str:
 
 
 def _is_allowed_backend_url(url: str) -> bool:
-    if url == settings.SKIN_SCANS_URL:
+    configured_urls = (
+        settings.SKIN_SCANS_URL,
+        settings.BACKEND_URL,
+        settings.LAB_REPORTS_URL,
+        settings.CYCLE_ENGINE_PROFILE_URL,
+        settings.CYCLE_ENGINE_SNAPSHOT_URL,
+        settings.HEALTH_TRENDS_HEALTH_LOGS_URL,
+    )
+    if url in configured_urls:
         return True
 
     parsed = urlparse(url)
+    allowed_netlocs = {_origin_netloc(configured_url) for configured_url in configured_urls if configured_url}
     return (
         parsed.scheme in {"http", "https"}
-        and parsed.netloc in {_origin_netloc(settings.SKIN_SCANS_URL), _origin_netloc(settings.BACKEND_URL)}
-        and (parsed.path.startswith("/storage/") or parsed.path.startswith(urlparse(settings.BACKEND_URL).path))
+        and parsed.netloc in allowed_netlocs
+        and (parsed.path.startswith("/storage/") or parsed.path.startswith("/api/"))
     )
 
 
