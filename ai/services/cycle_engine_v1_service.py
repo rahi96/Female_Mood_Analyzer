@@ -1,5 +1,7 @@
-"""Deterministic Cycle Engine v1 API (build-order complete).
+"""Cycle Engine v1 API.
 
+GET responses fetch backend user profile + snapshot, then Claude analyzes that data
+and generates the JSON response. Deterministic helpers remain as fallbacks.
 Hormone levels are modeled from cycle phase (not lab measurements).
 """
 
@@ -31,8 +33,18 @@ OPK_WINDOW_LEAD_DAYS = 4
 CONSENT_VERSION_DEFAULT = "2026-07-cycle-engine-v1"
 RETRYABLE_LLM_STATUS_CODES = {429, 500, 502, 503, 529}
 LLM_RETRY_DELAYS_SECONDS = (0.5, 1.0)
+MAX_CONTEXT_CHARS = 14000
 
 AI_SYSTEM_PROMPT = (
+    "You are a careful female cycle-engine analysis assistant. "
+    "Analyze only the provided user_profile, snapshot, and local_logs JSON. "
+    "Do not invent temperatures, OPK results, mucus logs, period dates, or ovulation days "
+    "that are not supported by the data. "
+    "Do not diagnose or prescribe. "
+    "Return valid JSON only — no markdown, no code fences, no preamble."
+)
+
+AI_COPY_SYSTEM_PROMPT = (
     "You write short, calm, clear health-adjacent UI copy for a cycle-tracking app. "
     "Use only the facts provided. Do not invent numbers, diagnoses, or medical advice. "
     "Return plain text only: no markdown, no preamble, 1-2 sentences max."
@@ -60,6 +72,7 @@ PHASE_EDUCATION_FACTS = {
 }
 
 _AI_CACHE: dict[str, str] = {}
+_AI_JSON_CACHE: dict[str, dict[str, Any]] = {}
 _PHASE_EDU_CACHE: dict[str, dict[str, str]] = {}
 _USER_STATE: dict[int, dict[str, Any]] = {}
 
@@ -86,7 +99,7 @@ def engine_summary(user_id: int) -> dict[str, Any]:
     _require_consent_if_needed(state)
     reconciliation = _recompute_reconciliation(state)
     fertile_start, fertile_end = _fertile_window(reconciliation["calendar_predicted_day"])
-    return {
+    fallback = {
         "cycle_summary": _cycle_summary(state),
         "fertile_window": {
             "start_day": fertile_start,
@@ -94,12 +107,31 @@ def engine_summary(user_id: int) -> dict[str, Any]:
             "label": f"Days {fertile_start}-{fertile_end}",
             "peak_day": reconciliation.get("final_confirmed_day") or reconciliation["calendar_predicted_day"],
             "peak_source": reconciliation.get("final_source"),
+            "mucus_peak_day": None,
+            "lh_surge_day": reconciliation.get("lh_surge_day"),
+            "bbt_confirmed_day": reconciliation.get("bbt_confirmed_day"),
         },
         "reliability": _reliability(state),
         "reconciliation": reconciliation,
         "sources": state["sources"],
         "backend_errors": state["backend_errors"],
     }
+    return _ai_endpoint_response(
+        "engine_summary",
+        state,
+        (
+            "Build the Engine dashboard summary JSON with keys: "
+            "cycle_summary (user_id, current_cycle_day, current_phase, avg_cycle_length, "
+            "cycle_variance_days, current_mode), "
+            "fertile_window (start_day, end_day, label, peak_day, peak_source, "
+            "mucus_peak_day, lh_surge_day, bbt_confirmed_day), "
+            "reliability (level low|moderate|high, completed_cycles, text), "
+            "reconciliation (calendar_predicted_day, bbt_confirmed_day, lh_surge_day, "
+            "final_confirmed_day, final_source, offset_days, luteal_phase_length). "
+            "Use profile + snapshot + local_logs. Prefer confirmed BBT/LH over calendar alone."
+        ),
+        fallback,
+    )
 
 
 def engine_signal_status(user_id: int) -> dict[str, Any]:
@@ -107,17 +139,29 @@ def engine_signal_status(user_id: int) -> dict[str, Any]:
     _require_consent_if_needed(state)
     today = _today()
     reconciliation = _recompute_reconciliation(state)
-    signals = [
-        _signal_card(
-            "Calendar",
-            _has_period_log_today(state, today),
-            f"Predicts ovulation Day {reconciliation['calendar_predicted_day']}",
+    fallback = {
+        "signals": [
+            _signal_card(
+                "Calendar",
+                _has_period_log_today(state, today),
+                f"Predicts ovulation Day {reconciliation['calendar_predicted_day']}",
+            ),
+            _signal_card("OPK / LH", _has_log_today(state["opk_logs"], today), _opk_status_text(state, today)),
+            _signal_card("BBT", _has_log_today(state["bbt_logs"], today), _bbt_status_text(state)),
+            _signal_card("Mucus", _has_log_today(state["mucus_logs"], today), _mucus_status_text(state, today)),
+        ]
+    }
+    return _ai_endpoint_response(
+        "engine_signal_status",
+        state,
+        (
+            "Return JSON {signals:[...]} with exactly 4 signals in order: "
+            "Calendar, OPK / LH, BBT, Mucus. Each item needs signal, logged_today (bool), "
+            "status_text (short UI string based on today's logs / confirmation state)."
         ),
-        _signal_card("OPK / LH", _has_log_today(state["opk_logs"], today), _opk_status_text(state, today)),
-        _signal_card("BBT", _has_log_today(state["bbt_logs"], today), _bbt_status_text(state)),
-        _signal_card("Mucus", _has_log_today(state["mucus_logs"], today), _mucus_status_text(state, today)),
-    ]
-    return {"signals": signals}
+        fallback,
+        max_tokens=900,
+    )
 
 
 def engine_discrepancy_note(user_id: int) -> dict[str, Any]:
@@ -127,21 +171,31 @@ def engine_discrepancy_note(user_id: int) -> dict[str, Any]:
     calendar_day = reconciliation.get("calendar_predicted_day")
     bbt_day = reconciliation.get("bbt_confirmed_day")
     if not calendar_day or not bbt_day or calendar_day == bbt_day:
-        return {
+        fallback = {
             "active": False,
             "message": "Calendar and confirmed ovulation signals are currently aligned.",
         }
-    offset = bbt_day - calendar_day
-    facts = {
-        "calendar_predicted_day": calendar_day,
-        "bbt_confirmed_day": bbt_day,
-        "offset_days": offset,
-    }
-    fallback = (
-        f"Calendar predicted Day {calendar_day}, BBT confirmed Day {bbt_day}. "
-        f"This {abs(offset)}-day offset has been recorded to refine future predictions."
+    else:
+        offset = bbt_day - calendar_day
+        fallback = {
+            "active": True,
+            "message": (
+                f"Calendar predicted Day {calendar_day}, BBT confirmed Day {bbt_day}. "
+                f"This {abs(offset)}-day offset has been recorded to refine future predictions."
+            ),
+        }
+    return _ai_endpoint_response(
+        "engine_discrepancy_note",
+        state,
+        (
+            "Return JSON {active:bool, message:str}. "
+            "If calendar_predicted_day and bbt_confirmed_day both exist and differ, active=true "
+            "and message explains the offset calmly in 1-2 sentences. "
+            "Otherwise active=false with an aligned message."
+        ),
+        fallback,
+        max_tokens=400,
     )
-    return {"active": True, "message": _ai_text("engine_discrepancy_note", facts, fallback)}
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +235,20 @@ def calendar_month(user_id: int, month: str) -> dict[str, Any]:
                 "tag": tag,
             }
         )
-    return {"month": month, "days": days}
+    fallback = {"month": month, "days": days}
+    return _ai_endpoint_response(
+        f"calendar_month:{month}",
+        state,
+        (
+            f"Build calendar month JSON for {month}. "
+            "Return {month, days:[{date, cycle_day|null, tag}]}. "
+            "tag must be one of: period, fertile_window, ovulation_predicted, "
+            "ovulation_confirmed, luteal, none. "
+            "Include every day of the month. Use profile/snapshot period and ovulation data."
+        ),
+        fallback,
+        max_tokens=2500,
+    )
 
 
 def calendar_confirm_day(user_id: int, payload: ConfirmDayRequest) -> dict[str, Any]:
@@ -198,6 +265,7 @@ def calendar_confirm_day(user_id: int, payload: ConfirmDayRequest) -> dict[str, 
         }
     state["cycle_start_date"] = payload.date.isoformat()
     reconciliation_recompute(user_id)
+    _clear_ai_caches()
     return {"accepted": True, "current_cycle_day": 1, "recomputed": True}
 
 
@@ -207,7 +275,7 @@ def calendar_next_period(user_id: int) -> dict[str, Any]:
     rolling_avg = round(sum(lengths) / len(lengths), 1) if lengths else float(state["avg_cycle_length"])
     variance = max(lengths) - min(lengths) if lengths else int(state["cycle_variance_days"])
     predicted = state["cycle_start_date"] + timedelta(days=round(rolling_avg))
-    return {
+    fallback = {
         "predicted_date": predicted.isoformat(),
         "days_until": max(0, (predicted - _today()).days),
         "rolling_avg_length": rolling_avg,
@@ -215,6 +283,17 @@ def calendar_next_period(user_id: int) -> dict[str, Any]:
         "within_normal_range": variance <= 7,
         "last_4_cycle_lengths": lengths[-4:],
     }
+    return _ai_endpoint_response(
+        "calendar_next_period",
+        state,
+        (
+            "Return JSON with predicted_date (YYYY-MM-DD), days_until, rolling_avg_length, "
+            "variance_days, within_normal_range (bool), last_4_cycle_lengths (list of ints). "
+            "Derive from profile/snapshot cycle history when available."
+        ),
+        fallback,
+        max_tokens=700,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -233,12 +312,17 @@ def bbt_log(user_id: int, payload: BBTLogRequest) -> dict[str, Any]:
     }
     state["bbt_logs"] = [log for log in state["bbt_logs"] if log.get("date") != entry["date"]]
     state["bbt_logs"].append(entry)
-    coverline = bbt_coverline_status(user_id)
+    cycle_state = _cycle_state(user_id)
+    coverline = _coverline_status(cycle_state)
+    if coverline.get("confirmed") and coverline.get("confirmed_day"):
+        state["bbt_confirmed_day"] = coverline["confirmed_day"]
+    reconciliation = reconciliation_recompute(user_id)
+    _clear_ai_caches()
     return {
         "stored": True,
         "log": entry,
         "coverline_status": coverline,
-        "reconciliation": reconciliation_recompute(user_id),
+        "reconciliation": reconciliation,
     }
 
 
@@ -265,7 +349,7 @@ def bbt_chart(user_id: int, cycle_day_range: str = "1-28") -> dict[str, Any]:
     luteal_length = None
     if confirmed_day:
         luteal_length = max(0, int(round(state["avg_cycle_length"])) - confirmed_day)
-    return {
+    fallback = {
         "points": points,
         "coverline_value": coverline.get("coverline_temp"),
         "confirmed_ovulation_day": confirmed_day,
@@ -273,6 +357,19 @@ def bbt_chart(user_id: int, cycle_day_range: str = "1-28") -> dict[str, Any]:
         "phase_label": "Normal",
         "cycle_day_range": {"start": start_day, "end": end_day},
     }
+    return _ai_endpoint_response(
+        f"bbt_chart:{cycle_day_range}",
+        state,
+        (
+            f"Return BBT chart JSON for cycle days {start_day}-{end_day}: "
+            "{points:[{day,date,temperature_f,is_excluded,flags}], coverline_value, "
+            "confirmed_ovulation_day, luteal_phase_length, phase_label, "
+            "cycle_day_range:{start,end}}. "
+            "Coverline = highest of prior 6 unflagged low temps; confirm after 3 days "
+            ">= 0.2F above coverline. Only use temperatures present in the data."
+        ),
+        fallback,
+    )
 
 
 def bbt_coverline_status(user_id: int) -> dict[str, Any]:
@@ -283,7 +380,16 @@ def bbt_coverline_status(user_id: int) -> dict[str, Any]:
         user = _user_state(user_id)
         user["bbt_confirmed_day"] = status["confirmed_day"]
         _recompute_reconciliation(state)
-    return status
+    return _ai_endpoint_response(
+        "bbt_coverline_status",
+        state,
+        (
+            "Return JSON {coverline_temp, days_above_coverline_streak, confirmed, confirmed_day}. "
+            "Apply coverline rules on BBT logs from profile/snapshot/local_logs only."
+        ),
+        status,
+        max_tokens=500,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -304,20 +410,34 @@ def opk_testing_window(user_id: int) -> dict[str, Any]:
         window_status = "closed"
     else:
         window_status = "open"
-    return {
+    fallback = {
         "window_start_day": window_start,
         "window_end_day": window_end,
         "predicted_peak_day": peak,
         "window_status": window_status,
     }
+    return _ai_endpoint_response(
+        "opk_testing_window",
+        state,
+        (
+            "Return JSON {window_start_day, window_end_day, predicted_peak_day, "
+            "window_status: not_open|open|closed}. "
+            "Window typically opens ~4 days before predicted ovulation."
+        ),
+        fallback,
+        max_tokens=400,
+    )
 
 
 def opk_log(user_id: int, payload: OPKLogRequest) -> dict[str, Any]:
     state = _user_state(user_id)
     cycle_state = _cycle_state(user_id)
-    window = opk_testing_window(user_id)
+    reconciliation = _recompute_reconciliation(cycle_state)
+    peak = reconciliation["calendar_predicted_day"]
+    window_start = max(1, peak - OPK_WINDOW_LEAD_DAYS)
+    window_end = peak
     cycle_day = _cycle_day_for_date(cycle_state, payload.date)
-    outside_window = cycle_day < window["window_start_day"] or cycle_day > window["window_end_day"]
+    outside_window = cycle_day < window_start or cycle_day > window_end
     note = {
         "negative": "LH not elevated",
         "rising": "LH rising",
@@ -339,6 +459,7 @@ def opk_log(user_id: int, payload: OPKLogRequest) -> dict[str, Any]:
         state["lh_surge_day"] = cycle_day
         state["lh_surge_at"] = _utc_now().isoformat()
     reconciliation = reconciliation_recompute(user_id)
+    _clear_ai_caches()
     return {
         "stored": True,
         "log": entry,
@@ -353,17 +474,39 @@ def opk_today_status(user_id: int) -> dict[str, Any]:
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     today = _today()
-    window = opk_testing_window(user_id)
+    # Use deterministic window for fallback to avoid nested AI calls.
+    reconciliation = _recompute_reconciliation(state)
+    peak = reconciliation["calendar_predicted_day"]
+    window_start = max(1, peak - OPK_WINDOW_LEAD_DAYS)
+    window_end = peak
+    current_day = state["current_cycle_day"]
+    if current_day < window_start:
+        window_status = "not_open"
+    elif current_day > window_end:
+        window_status = "closed"
+    else:
+        window_status = "open"
     today_log = next((log for log in state["opk_logs"] if log.get("date") == today.isoformat()), None)
-    return {
+    fallback = {
         "date": today.isoformat(),
         "logged": today_log is not None,
         "result": today_log.get("result") if today_log else None,
         "lh_value": today_log.get("lh_value") if today_log else None,
         "note": today_log.get("note") if today_log else "Not yet logged today",
-        "outside_window": window["window_status"] != "open",
-        "window_status": window["window_status"],
+        "outside_window": window_status != "open",
+        "window_status": window_status,
     }
+    return _ai_endpoint_response(
+        "opk_today_status",
+        state,
+        (
+            "Return today's OPK status JSON: "
+            "{date, logged, result, lh_value, note, outside_window, window_status}. "
+            "Base note on actual OPK logs in the data."
+        ),
+        fallback,
+        max_tokens=500,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +521,18 @@ def reconciliation_recompute(user_id: int) -> dict[str, Any]:
 def reconciliation_current(user_id: int) -> dict[str, Any]:
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
-    return _recompute_reconciliation(state)
+    fallback = _recompute_reconciliation(state)
+    return _ai_endpoint_response(
+        "reconciliation_current",
+        state,
+        (
+            "Return OvulationReconciliation JSON: user_id, cycle_id, calendar_predicted_day, "
+            "bbt_confirmed_day, lh_surge_day, final_confirmed_day, final_source, offset_days, "
+            "luteal_phase_length. Priority for final day: BBT > LH surge (+1 day) > calendar."
+        ),
+        fallback,
+        max_tokens=700,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -398,24 +552,30 @@ def ttc_surge_banner(user_id: int) -> dict[str, Any]:
         if 0 <= elapsed <= 36:
             active = True
             hours_remaining = max(0, int(round(36 - elapsed)))
-    facts = {
-        "active": active,
-        "hours_remaining_estimate": hours_remaining,
-        "cycle_day": state["current_cycle_day"],
-        "lh_surge_day": reconciliation.get("lh_surge_day"),
-    }
-    fallback = (
+    message = (
         f"LH surge window is open — about {hours_remaining} hours remain in this fertile window."
         if active
         else "No active LH surge window right now."
     )
-    message = _ai_text("ttc_surge_banner", facts, fallback) if active else fallback
-    return {
+    fallback = {
         "active": active,
         "message": message,
         "hours_remaining_estimate": hours_remaining,
         "cycle_day": state["current_cycle_day"],
+        "lh_surge_day": reconciliation.get("lh_surge_day"),
     }
+    return _ai_endpoint_response(
+        "ttc_surge_banner",
+        state,
+        (
+            "Return TTC surge banner JSON: "
+            "{active, message, hours_remaining_estimate, cycle_day, lh_surge_day}. "
+            "Active only when LH surge is recent (~36h) and BBT has not confirmed yet. "
+            "Message should be calm and actionable, based on the data."
+        ),
+        fallback,
+        max_tokens=500,
+    )
 
 
 def ttc_priority_map(user_id: int) -> dict[str, Any]:
@@ -457,40 +617,56 @@ def ttc_priority_map(user_id: int) -> dict[str, Any]:
             "priority": "low",
         }
     )
-    return {"cycle_day": state["current_cycle_day"], "ranges": ranges}
+    fallback = {"cycle_day": state["current_cycle_day"], "ranges": ranges}
+    return _ai_endpoint_response(
+        "ttc_priority_map",
+        state,
+        (
+            "Return JSON {cycle_day, ranges:[{start_day,end_day,label,priority}]}. "
+            "Priorities: sperm viability ~5 days before ovulation = moderate; "
+            "LH surge day = high; ovulation day = highest; post-ovulation = low."
+        ),
+        fallback,
+        max_tokens=800,
+    )
 
 
 def ttc_priority_banner(user_id: int) -> dict[str, Any]:
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
-    priority_map = ttc_priority_map(user_id)
+    reconciliation = _recompute_reconciliation(state)
+    peak = reconciliation.get("final_confirmed_day") or reconciliation["calendar_predicted_day"]
     current_day = state["current_cycle_day"]
-    priority_rank = {"low": 0, "moderate": 1, "high": 2, "highest": 3}
-    current = None
-    for item in priority_map["ranges"]:
-        if item["start_day"] <= current_day <= item["end_day"]:
-            if current is None or priority_rank[item["priority"]] > priority_rank[current["priority"]]:
-                current = item
-    if current is None:
-        current = {"priority": "low", "label": "outside_priority_window", "start_day": current_day, "end_day": current_day}
-    facts = {
-        "priority": current["priority"],
-        "label": current["label"],
-        "cycle_day": current_day,
-    }
+    if current_day == peak:
+        priority, label = "highest", "predicted_ovulation_window"
+    elif reconciliation.get("lh_surge_day") == current_day:
+        priority, label = "high", "lh_surge_day"
+    elif peak - SPERM_VIABILITY_DAYS <= current_day < peak:
+        priority, label = "moderate", "sperm_viability_window"
+    else:
+        priority, label = "low", "outside_priority_window"
     fallbacks = {
         "highest": "This is your highest priority moment — act within the next 24 hours.",
         "high": "Priority is high today — your fertile window is peaking.",
         "moderate": "This is a moderate-priority fertile day — timing still matters.",
         "low": "Fertility priority is low right now.",
     }
-    fallback = fallbacks.get(current["priority"], fallbacks["low"])
-    return {
-        "priority": current["priority"],
-        "label": current["label"],
+    fallback = {
+        "priority": priority,
+        "label": label,
         "cycle_day": current_day,
-        "message": _ai_text("ttc_priority_banner", facts, fallback),
+        "message": fallbacks[priority],
     }
+    return _ai_endpoint_response(
+        "ttc_priority_banner",
+        state,
+        (
+            "Return JSON {priority, label, cycle_day, message}. "
+            "Choose the highest current priority from the user's cycle data and write one calm sentence."
+        ),
+        fallback,
+        max_tokens=500,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -508,12 +684,26 @@ def awareness_current_phase(user_id: int) -> dict[str, Any]:
         "ovulatory": "LH and estrogen are typically peaking around ovulation.",
         "luteal": "Progesterone is typically dominant after ovulation.",
     }
-    return {
+    fallback = {
         "phase": phase,
         "day_range": day_range,
         "dominant_hormone_note": notes[phase],
         "current_cycle_day": state["current_cycle_day"],
+        "energy": "Declining" if phase in {"menstrual", "luteal"} else "Rising",
+        "skin": "May breakout" if phase == "luteal" else "Clearer",
+        "mood": "Relaxed/Inward" if phase == "luteal" else "Steady",
     }
+    return _ai_endpoint_response(
+        "awareness_current_phase",
+        state,
+        (
+            "Return current phase JSON: "
+            "{phase, day_range, dominant_hormone_note, current_cycle_day, energy, skin, mood}. "
+            "Derive phase from profile/snapshot cycle day. energy/skin/mood are qualitative UI labels."
+        ),
+        fallback,
+        max_tokens=600,
+    )
 
 
 def awareness_hormone_levels(user_id: int) -> dict[str, Any]:
@@ -521,37 +711,56 @@ def awareness_hormone_levels(user_id: int) -> dict[str, Any]:
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     levels = HORMONE_BY_PHASE[state["current_phase"]]
-    return {
+    fallback = {
         **levels,
         "modeled": True,
         "source": "cycle_phase_lookup",
         "note": "Qualitative hormone display is derived from cycle phase, not lab measurements.",
     }
+    return _ai_endpoint_response(
+        "awareness_hormone_levels",
+        state,
+        (
+            "Return modeled hormone levels JSON: "
+            "{estrogen, progesterone, lh, modeled:true, source, note}. "
+            "Values must be low|rising|high|declining. "
+            "These are phase-modeled qualitative values, NOT lab measurements."
+        ),
+        fallback,
+        max_tokens=400,
+    )
 
 
 def awareness_phase_education(user_id: int) -> dict[str, Any]:
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     phase = state["current_phase"]
-    if phase in _PHASE_EDU_CACHE:
-        return {"phase": phase, **_PHASE_EDU_CACHE[phase], "cached": True}
-    facts = {"phase": phase, "physiological_facts": PHASE_EDUCATION_FACTS[phase]}
-    fallback = {
+    fallback_notes = {
         "bbt_note": "BBT usually stays lower before ovulation and rises after ovulation.",
         "energy_note": "Energy often tracks estrogen — lower in menses, rising mid-cycle.",
         "hormone_note": PHASE_EDUCATION_FACTS[phase],
         "focus_note": "Use this phase to notice patterns without over-interpreting single days.",
     }
-    prompt = (
-        f"Phase: {phase}. Facts: {PHASE_EDUCATION_FACTS[phase]}. "
-        "Return exactly 4 short lines labeled BBT:, Energy:, Hormone:, Focus:."
+    fallback = {"phase": phase, **fallback_notes, "cached": False}
+    result = _ai_endpoint_response(
+        f"awareness_phase_education:{phase}",
+        state,
+        (
+            f"Current phase is {phase}. Return JSON "
+            "{phase, bbt_note, energy_note, hormone_note, focus_note}. "
+            "Each note 1 short sentence grounded in the user's cycle context."
+        ),
+        fallback,
+        max_tokens=700,
     )
-    text = _ai_text("awareness_phase_education", facts, "", prompt_override=prompt)
-    notes = _parse_phase_education(text) if text else fallback
-    if not notes.get("bbt_note"):
-        notes = fallback
-    _PHASE_EDU_CACHE[phase] = notes
-    return {"phase": phase, **notes, "cached": False}
+    if result.get("ai_generated"):
+        _PHASE_EDU_CACHE[phase] = {
+            "bbt_note": result.get("bbt_note", ""),
+            "energy_note": result.get("energy_note", ""),
+            "hormone_note": result.get("hormone_note", ""),
+            "focus_note": result.get("focus_note", ""),
+        }
+    return result
 
 
 def awareness_four_phase_wheel(user_id: int) -> dict[str, Any]:
@@ -569,7 +778,18 @@ def awareness_four_phase_wheel(user_id: int) -> dict[str, Any]:
                 "is_current": phase == current,
             }
         )
-    return {"current_phase": current, "phases": phases}
+    fallback = {"current_phase": current, "phases": phases}
+    return _ai_endpoint_response(
+        "awareness_four_phase_wheel",
+        state,
+        (
+            "Return 4-phase wheel JSON: "
+            "{current_phase, phases:[{phase, day_range, status, is_current}]}. "
+            "status one-word labels like Low/Rising/Peak/Falling. Mark only current phase true."
+        ),
+        fallback,
+        max_tokens=700,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -939,8 +1159,84 @@ def _mucus_status_text(state: dict[str, Any], today: date) -> str:
 
 
 # ---------------------------------------------------------------------------
-# AI helper (§0.1)
+# AI analysis from backend profile + snapshot
 # ---------------------------------------------------------------------------
+
+def _clear_ai_caches() -> None:
+    _AI_CACHE.clear()
+    _AI_JSON_CACHE.clear()
+    _PHASE_EDU_CACHE.clear()
+
+
+def _ai_endpoint_response(
+    endpoint: str,
+    state: dict[str, Any],
+    instruction: str,
+    fallback: dict[str, Any],
+    max_tokens: int = 1800,
+) -> dict[str, Any]:
+    """Fetch-backed Claude analysis for a Cycle Engine v1 GET response."""
+    context = _analysis_context(state)
+    cache_key = hashlib.sha256(
+        f"{endpoint}:{json.dumps(context, sort_keys=True, default=str)}".encode("utf-8")
+    ).hexdigest()
+    if cache_key in _AI_JSON_CACHE:
+        cached = dict(_AI_JSON_CACHE[cache_key])
+        cached["ai_generated"] = True
+        cached["ai_cached"] = True
+        return cached
+
+    prompt = (
+        f"Endpoint: {endpoint}\n"
+        f"Today: {_today().isoformat()}\n\n"
+        "Backend + local cycle context (analyze this data):\n"
+        f"{_to_context_json(context)}\n\n"
+        f"{instruction}\n\n"
+        "Return one JSON object only."
+    )
+    text = _call_ai_json(prompt, max_tokens=max_tokens)
+    parsed = _parse_json_object(text)
+    if not isinstance(parsed, dict) or not parsed:
+        result = dict(fallback)
+        result["ai_generated"] = False
+        result["ai_fallback"] = True
+        result["sources"] = state.get("sources") or fallback.get("sources")
+        result["backend_errors"] = state.get("backend_errors") or fallback.get("backend_errors") or {}
+        return result
+
+    parsed["ai_generated"] = True
+    parsed["ai_cached"] = False
+    parsed["sources"] = state.get("sources")
+    if state.get("backend_errors"):
+        parsed["backend_errors"] = state["backend_errors"]
+    _AI_JSON_CACHE[cache_key] = parsed
+    return parsed
+
+
+def _analysis_context(state: dict[str, Any]) -> dict[str, Any]:
+    reconciliation = _recompute_reconciliation(state)
+    return {
+        "user_profile": state.get("profile"),
+        "snapshot": state.get("snapshot"),
+        "local_logs": {
+            "period_logs": state.get("period_logs") or [],
+            "bbt_logs": state.get("bbt_logs") or [],
+            "opk_logs": state.get("opk_logs") or [],
+            "mucus_logs": state.get("mucus_logs") or [],
+        },
+        "cycle_summary": _cycle_summary(state),
+        "reconciliation": reconciliation,
+        "coverline": _coverline_status(state),
+        "backend_errors": state.get("backend_errors") or {},
+    }
+
+
+def _to_context_json(payload: Any) -> str:
+    text = json.dumps(payload, indent=2, ensure_ascii=True, default=str)
+    if len(text) <= MAX_CONTEXT_CHARS:
+        return text
+    return text[: MAX_CONTEXT_CHARS - 32] + "\n... [truncated]"
+
 
 def _ai_text(
     endpoint: str,
@@ -959,7 +1255,7 @@ def _ai_text(
         f"{json.dumps(facts, indent=2, default=str)}\n\n"
         "Write one calm UI sentence using only these facts."
     )
-    text = _call_ai(prompt)
+    text = _call_ai_copy(prompt)
     if not text:
         text = fallback
     if text:
@@ -967,13 +1263,31 @@ def _ai_text(
     return text or fallback
 
 
-def _call_ai(prompt: str) -> str:
+def _call_ai_json(prompt: str, max_tokens: int = 1800) -> str:
     attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
     for attempt in range(attempts):
         try:
             result = llm_call(
                 prompt=prompt,
                 system=AI_SYSTEM_PROMPT,
+                max_tokens=max_tokens,
+                temperature=0.2,
+            )
+            return str(result or "").strip()
+        except Exception as exc:
+            if attempt >= attempts - 1 or not _is_retryable_llm_error(exc):
+                return ""
+            time.sleep(LLM_RETRY_DELAYS_SECONDS[attempt])
+    return ""
+
+
+def _call_ai_copy(prompt: str) -> str:
+    attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(attempts):
+        try:
+            result = llm_call(
+                prompt=prompt,
+                system=AI_COPY_SYSTEM_PROMPT,
                 max_tokens=150,
                 temperature=0.2,
             )
@@ -983,6 +1297,23 @@ def _call_ai(prompt: str) -> str:
                 return ""
             time.sleep(LLM_RETRY_DELAYS_SECONDS[attempt])
     return ""
+
+
+def _parse_json_object(text: str) -> Any | None:
+    if not text:
+        return None
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        cleaned = "\n".join(line for line in lines if not line.startswith("```")).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError:
+        return None
 
 
 def _parse_phase_education(text: str) -> dict[str, str]:

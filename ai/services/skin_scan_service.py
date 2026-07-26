@@ -55,6 +55,24 @@ def analyze_live_skin_scan(
     return _generate_skin_metrics(image_bytes, content_type, context)
 
 
+def analyze_live_skin_scan_session(
+    frames: list[dict[str, Any]],
+    context: dict[str, Any] | None = None,
+    max_frames: int = 10,
+) -> SkinScanMetrics:
+    """Analyze all collected live frames together into one overall result."""
+    if not frames:
+        raise ValueError("At least one skin scan frame is required before finalize")
+
+    selected = _select_session_frames(frames, max_frames=max_frames)
+    prompt = _build_skin_scan_session_prompt(len(frames), len(selected), context)
+    response_text = _call_skin_scan_session_llm(selected, prompt)
+    parsed = _parse_skin_metrics(response_text)
+    if parsed:
+        return parsed
+    return _fallback_skin_metrics()
+
+
 def fetch_skin_scan_context() -> tuple[dict[str, Any], dict[str, str]]:
     sources = {
         "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
@@ -176,25 +194,110 @@ Backend wellness context JSON:
     return f"{base_prompt}{context_json}"
 
 
-def _call_skin_scan_llm(image_bytes: bytes, media_type: str, prompt: str) -> str:
-    attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
-    image_data = base64.b64encode(image_bytes).decode("ascii")
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": image_data,
-                    },
-                },
-                {"type": "text", "text": prompt},
-            ],
-        }
+def _build_skin_scan_session_prompt(
+    total_frames: int,
+    selected_frames: int,
+    context: dict[str, Any] | None = None,
+) -> str:
+    context_json = _skin_scan_context_json(context)
+    return f"""Analyze ALL of these live skin-scan frames together as one session.
+
+You received {selected_frames} frame image(s) from a session that captured {total_frames} frame(s) total.
+Produce one overall cosmetic/wellness assessment across the full set — not a separate score per frame.
+
+Generate this exact JSON shape:
+{{
+  "overall_score": 80,
+  "hydration_score": 72,
+  "redness_score": 22,
+  "texture_score": 84,
+  "glow_index": 68,
+  "pore_health_score": 79,
+  "elasticity_score": 81,
+  "hydration_status": "Fair",
+  "redness_status": "Low",
+  "texture_status": "Good",
+  "glow_status": "Fair",
+  "pore_health_status": "Low",
+  "elasticity_status": "Good",
+  "neumera_insight": "..."
+}}
+
+Requirements:
+- Return only the analysis fields above. Do not include id, user_id, image_path, created_at, or updated_at.
+- All score fields must be integers from 0 to 100.
+- Prefer patterns that appear across multiple frames; discount one-off lighting/angle artifacts.
+- Make neumera_insight concise, practical, and non-medical.
+- Use backend wellness context only when present in the JSON below.
+- Do not invent wearable, sleep, water-intake, cycle, or lifestyle correlations unless those data are explicitly provided.
+
+Backend wellness context JSON:
+{context_json}
+"""
+
+
+def _select_session_frames(frames: list[dict[str, Any]], max_frames: int = 10) -> list[dict[str, Any]]:
+    if len(frames) <= max_frames:
+        return frames
+    if max_frames <= 1:
+        return [frames[-1]]
+    # Evenly sample across the session so early/mid/late frames are represented.
+    indexes = [
+        round(index * (len(frames) - 1) / (max_frames - 1))
+        for index in range(max_frames)
     ]
+    selected: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for index in indexes:
+        if index in seen:
+            continue
+        seen.add(index)
+        selected.append(frames[index])
+    return selected
+
+
+def _call_skin_scan_llm(image_bytes: bytes, media_type: str, prompt: str) -> str:
+    content = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.b64encode(image_bytes).decode("ascii"),
+            },
+        },
+        {"type": "text", "text": prompt},
+    ]
+    return _chat_skin_scan(content)
+
+
+def _call_skin_scan_session_llm(frames: list[dict[str, Any]], prompt: str) -> str:
+    content: list[dict[str, Any]] = []
+    for index, frame in enumerate(frames, start=1):
+        image_bytes = frame.get("image_bytes") or b""
+        if not image_bytes:
+            continue
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": _image_media_type(str(frame.get("content_type") or "image/jpeg")),
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                },
+            }
+        )
+        content.append({"type": "text", "text": f"Frame {index} of {len(frames)}"})
+    content.append({"type": "text", "text": prompt})
+    return _chat_skin_scan(content)
+
+
+def _chat_skin_scan(content: list[dict[str, Any]]) -> str:
+    if not any(block.get("type") == "image" for block in content):
+        return ""
+
+    attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
+    messages = [{"role": "user", "content": content}]
 
     for attempt in range(attempts):
         try:

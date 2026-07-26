@@ -8,7 +8,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, W
 
 from ai.models.skin_scan_models import SkinScanResponse
 from ai.services.skin_scan_service import (
-    analyze_live_skin_scan,
+    analyze_live_skin_scan_session,
     extract_skin_scan_user_id,
     fetch_skin_scan_context,
     fetch_skin_scan_image_from_url,
@@ -104,11 +104,16 @@ async def _extract_post_skin_scan_image(
 @router.websocket("/skin-scan/live")
 async def skin_scan_live_websocket(websocket: WebSocket):
     await websocket.accept()
+    session_frames: list[dict[str, Any]] = []
     await websocket.send_json(
         {
             "type": "skin_scan_ready",
             "success": True,
-            "message": "Send camera image bytes, base64/data URL, or JSON with image_url.",
+            "message": (
+                "Send camera frames as image bytes, base64/data URL, or JSON with image_url. "
+                "Frames are collected only. Send {\"type\":\"finalize\"} or {\"type\":\"end_scan\"} "
+                "for one overall AI analysis of all frames."
+            ),
         }
     )
 
@@ -126,30 +131,59 @@ async def skin_scan_live_websocket(websocket: WebSocket):
                 await websocket.send_json({"type": "pong", "success": True})
                 continue
 
+            if _is_finalize_message(message):
+                if not session_frames:
+                    raise ValueError("No frames received yet. Send frames before finalize/end_scan.")
+
+                context, _ = fetch_skin_scan_context()
+                metrics = analyze_live_skin_scan_session(session_frames, context=context)
+                timestamp = skin_scan_timestamp()
+                last_frame = session_frames[-1]
+                scan_response = SkinScanResponse(
+                    user_id=extract_skin_scan_user_id(context),
+                    image_path=str(last_frame.get("source_path") or "live-session"),
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                    **metrics.model_dump(),
+                )
+                frame_ids = [frame.get("frame_id") for frame in session_frames if frame.get("frame_id")]
+                await websocket.send_json(
+                    {
+                        "type": "skin_scan_result",
+                        "success": True,
+                        "session": True,
+                        "frame_count": len(session_frames),
+                        "frame_ids": frame_ids,
+                        "content_type": last_frame.get("content_type"),
+                        "id": scan_response.id,
+                        "user_id": scan_response.user_id,
+                        "image_path": scan_response.image_path,
+                        "created_at": scan_response.created_at,
+                        "updated_at": scan_response.updated_at,
+                        "metrics": metrics.model_dump(),
+                        "scan": scan_response.model_dump(),
+                    }
+                )
+                session_frames.clear()
+                continue
+
             image_bytes, content_type, frame_id, source_path = _extract_live_image_message(message)
-            context, _ = fetch_skin_scan_context()
-            metrics = analyze_live_skin_scan(image_bytes, content_type, context=context)
-            timestamp = skin_scan_timestamp()
-            scan_response = SkinScanResponse(
-                user_id=extract_skin_scan_user_id(context),
-                image_path=source_path,
-                created_at=timestamp,
-                updated_at=timestamp,
-                **metrics.model_dump(),
+            session_frames.append(
+                {
+                    "image_bytes": image_bytes,
+                    "content_type": content_type,
+                    "frame_id": frame_id,
+                    "source_path": source_path,
+                }
             )
             await websocket.send_json(
                 {
-                    "type": "skin_scan_result",
+                    "type": "frame_received",
                     "success": True,
                     "frame_id": frame_id,
+                    "frame_count": len(session_frames),
                     "content_type": content_type,
-                    "id": scan_response.id,
-                    "user_id": scan_response.user_id,
-                    "image_path": scan_response.image_path,
-                    "created_at": scan_response.created_at,
-                    "updated_at": scan_response.updated_at,
-                    "metrics": metrics.model_dump(),
-                    "scan": scan_response.model_dump(),
+                    "message": "Frame stored. Send more frames, or finalize/end_scan for overall analysis.",
                 }
             )
         except WebSocketDisconnect:
@@ -192,6 +226,27 @@ def _is_ping_message(message: dict[str, Any]) -> bool:
         return False
 
     return isinstance(payload, dict) and str(payload.get("type", "")).lower() == "ping"
+
+
+def _is_finalize_message(message: dict[str, Any]) -> bool:
+    text = message.get("text")
+    if not isinstance(text, str):
+        return False
+
+    cleaned = text.strip()
+    if cleaned.lower() in {"finalize", "end_scan", "end-scan", "done"}:
+        return True
+
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return False
+
+    if not isinstance(payload, dict):
+        return False
+
+    msg_type = str(payload.get("type") or payload.get("action") or "").lower()
+    return msg_type in {"finalize", "end_scan", "end-scan", "done"}
 
 
 def _extract_live_image_message(message: dict[str, Any]) -> tuple[bytes, str, str | None, str]:
