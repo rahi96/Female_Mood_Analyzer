@@ -1,22 +1,32 @@
+import asyncio
 import base64
 import binascii
+import contextlib
 import json
 import re
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from starlette.concurrency import run_in_threadpool
 
 from ai.models.skin_scan_models import SkinScanResponse
 from ai.services.skin_scan_service import (
+    _optional_int,
+    analyze_live_skin_scan,
     analyze_live_skin_scan_session,
     extract_skin_scan_user_id,
     fetch_skin_scan_context,
     fetch_skin_scan_image_from_url,
+    persist_skin_scan,
     skin_scan_timestamp,
 )
 
 
 router = APIRouter()
+
+# Seconds of live capture after the first frame arrives before the server
+# automatically stops the scan and analyzes all collected frames together.
+SKIN_SCAN_CAPTURE_WINDOW_SECONDS = 20.0
 
 
 @router.post("/skin-scan", response_model=SkinScanResponse)
@@ -105,97 +115,179 @@ async def _extract_post_skin_scan_image(
 async def skin_scan_live_websocket(websocket: WebSocket):
     await websocket.accept()
     session_frames: list[dict[str, Any]] = []
+    # Guards a single finalize: whichever fires first (timer, finalize message,
+    # or disconnect) wins, and the others become no-ops.
+    finalized = False
+    capture_timer: asyncio.Task | None = None
+
     await websocket.send_json(
         {
             "type": "skin_scan_ready",
             "success": True,
+            "capture_window_seconds": SKIN_SCAN_CAPTURE_WINDOW_SECONDS,
             "message": (
-                "Send camera frames as image bytes, base64/data URL, or JSON with image_url. "
-                "Frames are collected only. Send {\"type\":\"finalize\"} or {\"type\":\"end_scan\"} "
-                "for one overall AI analysis of all frames."
+                "Stream camera frames as image bytes, base64/data URL, or JSON with image_url. "
+                f"Capture runs for {int(SKIN_SCAN_CAPTURE_WINDOW_SECONDS)}s after the first frame, then "
+                "the server automatically analyzes all frames together. Send {\"type\":\"finalize\"} "
+                "to stop early."
             ),
         }
     )
 
-    while True:
-        try:
-            message = await websocket.receive()
-        except WebSocketDisconnect:
-            break
-
-        if message.get("type") == "websocket.disconnect":
-            break
-
-        try:
-            if _is_ping_message(message):
-                await websocket.send_json({"type": "pong", "success": True})
-                continue
-
-            if _is_finalize_message(message):
-                if not session_frames:
-                    raise ValueError("No frames received yet. Send frames before finalize/end_scan.")
-
-                context, _ = fetch_skin_scan_context()
-                metrics = analyze_live_skin_scan_session(session_frames, context=context)
-                timestamp = skin_scan_timestamp()
-                last_frame = session_frames[-1]
-                scan_response = SkinScanResponse(
-                    user_id=extract_skin_scan_user_id(context),
-                    image_path=str(last_frame.get("source_path") or "live-session"),
-                    created_at=timestamp,
-                    updated_at=timestamp,
-                    **metrics.model_dump(),
-                )
-                frame_ids = [frame.get("frame_id") for frame in session_frames if frame.get("frame_id")]
-                await websocket.send_json(
-                    {
-                        "type": "skin_scan_result",
-                        "success": True,
-                        "session": True,
-                        "frame_count": len(session_frames),
-                        "frame_ids": frame_ids,
-                        "content_type": last_frame.get("content_type"),
-                        "id": scan_response.id,
-                        "user_id": scan_response.user_id,
-                        "image_path": scan_response.image_path,
-                        "created_at": scan_response.created_at,
-                        "updated_at": scan_response.updated_at,
-                        "metrics": metrics.model_dump(),
-                        "scan": scan_response.model_dump(),
-                    }
-                )
-                session_frames.clear()
-                continue
-
-            image_bytes, content_type, frame_id, source_path = _extract_live_image_message(message)
-            session_frames.append(
-                {
-                    "image_bytes": image_bytes,
-                    "content_type": content_type,
-                    "frame_id": frame_id,
-                    "source_path": source_path,
-                }
-            )
-            await websocket.send_json(
-                {
-                    "type": "frame_received",
-                    "success": True,
-                    "frame_id": frame_id,
-                    "frame_count": len(session_frames),
-                    "content_type": content_type,
-                    "message": "Frame stored. Send more frames, or finalize/end_scan for overall analysis.",
-                }
-            )
-        except WebSocketDisconnect:
-            break
-        except Exception as exc:
-            await websocket.send_json(
+    async def run_finalize(reason: str) -> None:
+        nonlocal finalized
+        if finalized:
+            return
+        finalized = True
+        if not session_frames:
+            await _safe_send_json(
+                websocket,
                 {
                     "type": "skin_scan_error",
                     "success": False,
-                    "detail": str(exc),
-                }
+                    "detail": "No frames were received before the scan stopped.",
+                    "reason": reason,
+                },
             )
+            return
+
+        frame_count = len(session_frames)
+        await _safe_send_json(
+            websocket,
+            {
+                "type": "analyzing",
+                "success": True,
+                "reason": reason,
+                "frame_count": frame_count,
+                "message": "Capture complete. Analyzing all frames together...",
+            },
+        )
+
+        try:
+            context, _ = await run_in_threadpool(fetch_skin_scan_context)
+            metrics = await run_in_threadpool(
+                analyze_live_skin_scan_session, session_frames, context
+            )
+            scan_response = await run_in_threadpool(
+                persist_skin_scan, session_frames, metrics, context
+            )
+        except Exception as exc:  # noqa: BLE001 - report failure to the client
+            await _safe_send_json(
+                websocket,
+                {
+                    "type": "skin_scan_error",
+                    "success": False,
+                    "detail": f"Skin scan analysis failed: {exc}",
+                    "reason": reason,
+                },
+            )
+            return
+
+        frame_ids = [frame.get("frame_id") for frame in session_frames if frame.get("frame_id")]
+        await _safe_send_json(
+            websocket,
+            {
+                "type": "skin_scan_result",
+                "success": True,
+                "session": True,
+                "reason": reason,
+                "frame_count": frame_count,
+                "frame_ids": frame_ids,
+                "content_type": session_frames[-1].get("content_type"),
+                "id": scan_response.id,
+                "user_id": scan_response.user_id,
+                "image_path": scan_response.image_path,
+                "created_at": scan_response.created_at,
+                "updated_at": scan_response.updated_at,
+                "metrics": metrics.model_dump(),
+                "scan": scan_response.model_dump(),
+            },
+        )
+
+    async def capture_countdown() -> None:
+        try:
+            await asyncio.sleep(SKIN_SCAN_CAPTURE_WINDOW_SECONDS)
+        except asyncio.CancelledError:
+            return
+        await run_finalize("capture_window_elapsed")
+
+    try:
+        while True:
+            try:
+                message = await websocket.receive()
+            except WebSocketDisconnect:
+                break
+
+            if message.get("type") == "websocket.disconnect":
+                break
+
+            try:
+                if _is_ping_message(message):
+                    await websocket.send_json({"type": "pong", "success": True})
+                    continue
+
+                if _is_finalize_message(message):
+                    if capture_timer is not None:
+                        capture_timer.cancel()
+                    await run_finalize("client_finalize")
+                    break
+
+                if finalized:
+                    # Capture already ended (timer fired); ignore late frames.
+                    continue
+
+                image_bytes, content_type, frame_id, source_path = _extract_live_image_message(message)
+                session_frames.append(
+                    {
+                        "image_bytes": image_bytes,
+                        "content_type": content_type,
+                        "frame_id": frame_id,
+                        "source_path": source_path,
+                    }
+                )
+
+                # Start the capture window on the first accepted frame.
+                if capture_timer is None:
+                    capture_timer = asyncio.create_task(capture_countdown())
+
+                await websocket.send_json(
+                    {
+                        "type": "frame_received",
+                        "success": True,
+                        "frame_id": frame_id,
+                        "frame_count": len(session_frames),
+                        "content_type": content_type,
+                        "capture_window_seconds": SKIN_SCAN_CAPTURE_WINDOW_SECONDS,
+                        "message": "Frame stored. Keep streaming; analysis runs automatically when capture ends.",
+                    }
+                )
+            except WebSocketDisconnect:
+                break
+            except Exception as exc:  # noqa: BLE001 - surface frame errors to the client
+                await _safe_send_json(
+                    websocket,
+                    {
+                        "type": "skin_scan_error",
+                        "success": False,
+                        "detail": str(exc),
+                    },
+                )
+
+        # Client disconnected or stopped sending: analyze whatever we captured.
+        if capture_timer is not None:
+            capture_timer.cancel()
+        await run_finalize("client_disconnect")
+    finally:
+        if capture_timer is not None:
+            capture_timer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await capture_timer
+
+
+async def _safe_send_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
+    """Send JSON, swallowing errors if the socket has already closed."""
+    with contextlib.suppress(Exception):
+        await websocket.send_json(payload)
 
 
 async def _read_optional_json_payload(request: Request) -> dict[str, Any]:

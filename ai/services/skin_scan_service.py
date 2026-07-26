@@ -73,6 +73,94 @@ def analyze_live_skin_scan_session(
     return _fallback_skin_metrics()
 
 
+def persist_skin_scan(
+    frames: list[dict[str, Any]],
+    metrics: SkinScanMetrics,
+    context: dict[str, Any] | None = None,
+) -> SkinScanResponse:
+    """Save a completed live session to the backend and return the stored record.
+
+    Best-effort: attempts to POST the representative frame image plus the AI
+    metrics to the configured skin-scans endpoint. If the backend does not
+    accept the upload (or returns no usable record), the analysis is still
+    returned to the client with ``id=None`` and a local ``image_path`` so a
+    scan is never lost just because persistence failed.
+    """
+    user_id = extract_skin_scan_user_id(context)
+    timestamp = skin_scan_timestamp()
+    representative = frames[-1] if frames else {}
+    fallback_image_path = str(
+        representative.get("source_path")
+        or representative.get("frame_id")
+        or "live-session"
+    )
+
+    record = _save_skin_scan_to_backend(representative, metrics, user_id)
+    if record:
+        return SkinScanResponse(
+            id=_optional_int(record.get("id")),
+            user_id=_optional_int(record.get("user_id")) or user_id,
+            image_path=str(record.get("image_path") or fallback_image_path),
+            created_at=_optional_str(record.get("created_at")) or timestamp,
+            updated_at=_optional_str(record.get("updated_at")) or timestamp,
+            **metrics.model_dump(),
+        )
+
+    return SkinScanResponse(
+        user_id=user_id,
+        image_path=fallback_image_path,
+        created_at=timestamp,
+        updated_at=timestamp,
+        **metrics.model_dump(),
+    )
+
+
+def _save_skin_scan_to_backend(
+    frame: dict[str, Any],
+    metrics: SkinScanMetrics,
+    user_id: int | None,
+) -> dict[str, Any] | None:
+    image_bytes = frame.get("image_bytes") if isinstance(frame, dict) else None
+    if not image_bytes:
+        return None
+
+    content_type = _image_media_type(str(frame.get("content_type") or "image/jpeg"))
+    filename = f"skin_scan.{content_type.split('/')[-1]}"
+
+    data: dict[str, Any] = {key: str(value) for key, value in metrics.model_dump().items()}
+    if user_id is not None:
+        data["user_id"] = str(user_id)
+
+    try:
+        response = httpx.post(
+            settings.SKIN_SCANS_URL,
+            headers=_backend_headers(),
+            data=data,
+            files={"image": (filename, image_bytes, content_type)},
+            timeout=30.0,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        if "json" not in response.headers.get("content-type", "").lower():
+            return None
+        return _extract_saved_skin_scan_record(response.json())
+    except Exception:
+        return None
+
+
+def _extract_saved_skin_scan_record(payload: Any) -> dict[str, Any] | None:
+    for record in _walk_dicts(payload):
+        if _optional_int(record.get("id")) is not None and (
+            _image_path_from_record(record) or record.get("image_path")
+        ):
+            result = dict(record)
+            image_path = _image_path_from_record(record) or record.get("image_path")
+            if image_path:
+                result["image_path"] = image_path
+            return result
+    return None
+
+
 def fetch_skin_scan_context() -> tuple[dict[str, Any], dict[str, str]]:
     sources = {
         "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,

@@ -1271,7 +1271,6 @@ def _call_ai_json(prompt: str, max_tokens: int = 1800) -> str:
                 prompt=prompt,
                 system=AI_SYSTEM_PROMPT,
                 max_tokens=max_tokens,
-                temperature=0.2,
             )
             return str(result or "").strip()
         except Exception as exc:
@@ -1289,7 +1288,6 @@ def _call_ai_copy(prompt: str) -> str:
                 prompt=prompt,
                 system=AI_COPY_SYSTEM_PROMPT,
                 max_tokens=150,
-                temperature=0.2,
             )
             return " ".join(str(result or "").strip().split())
         except Exception as exc:
