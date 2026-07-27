@@ -350,10 +350,8 @@ def fetch_user_plan(user_id: str) -> ChatPlan:
 
 
 def _chat_limit_for_plan(plan: ChatPlan) -> int | None:
-    if plan == "free":
-        return settings.FREE_CHAT_LIMIT
-    if plan == "premium":
-        return settings.PREMIUM_CHAT_LIMIT
+    # Chat is unlimited for all plans. Returning None disables quota enforcement
+    # in _enforce_chat_quota (it returns early when the limit is None).
     return None
 
 
