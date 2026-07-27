@@ -1,10 +1,8 @@
 from fastapi import FastAPI
 from ai.config import settings
 from ai.routes import chat_routes
-from ai.routes import cycle_routes
 from ai.routes import cycle_awareness_routes
 from ai.routes import daily_scripture_routes
-from ai.routes import cycle_engine_routes
 from ai.routes import cycle_engine_v1_routes
 from ai.routes import health_trends_routes
 from ai.routes import numera_insight_routes
@@ -19,8 +17,6 @@ app = FastAPI(
     debug=settings.DEBUG,
 )
 
-app.include_router(cycle_routes.router, prefix="/api", tags=["App_api's"])
-app.include_router(cycle_engine_routes.router, prefix="/api", tags=["Cycle_engine_api's"])
 app.include_router(
     cycle_engine_v1_routes.router,
     prefix="/api/v1/cycle-engine",
