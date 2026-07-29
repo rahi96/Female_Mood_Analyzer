@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from ai.config import settings
+from ai.config import settings, snapshot_url_for
 from ai.models.cycle_engine_v1_models import (
     BBTLogRequest,
     ConfirmDayRequest,
@@ -858,7 +858,8 @@ def _user_state(user_id: int) -> dict[str, Any]:
 def _cycle_state(user_id: int) -> dict[str, Any]:
     user = _user_state(user_id)
     profile, profile_error = _try_get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
-    snapshot, snapshot_error = _try_get_backend_json(settings.CYCLE_ENGINE_SNAPSHOT_URL)
+    snapshot_user_id = _extract_user_id(profile) or user_id
+    snapshot, snapshot_error = _try_get_backend_json(snapshot_url_for(snapshot_user_id))
 
     backend_periods = _extract_period_logs(snapshot, profile, user_id)
     backend_bbt = _extract_bbt_logs(snapshot, user_id)
@@ -907,7 +908,7 @@ def _cycle_state(user_id: int) -> dict[str, Any]:
         "offset_days": offset,
         "sources": {
             "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
-            "snapshot": settings.CYCLE_ENGINE_SNAPSHOT_URL,
+            "snapshot": snapshot_url_for(snapshot_user_id),
         },
         "backend_errors": {
             k: v
@@ -1204,6 +1205,7 @@ def _ai_endpoint_response(
         result["backend_errors"] = state.get("backend_errors") or fallback.get("backend_errors") or {}
         return result
 
+    _coerce_int_fields(parsed)
     parsed["ai_generated"] = True
     parsed["ai_cached"] = False
     parsed["sources"] = state.get("sources")
@@ -1211,6 +1213,45 @@ def _ai_endpoint_response(
         parsed["backend_errors"] = state["backend_errors"]
     _AI_JSON_CACHE[cache_key] = parsed
     return parsed
+
+
+_INT_FIELDS = frozenset({
+    "user_id", "current_cycle_day", "cycle_variance_days",
+    "start_day", "end_day", "peak_day", "lh_surge_day", "bbt_confirmed_day",
+    "mucus_peak_day", "confirmed_day", "confirmed_ovulation_day",
+    "calendar_predicted_day", "final_confirmed_day", "offset_days",
+    "luteal_phase_length", "completed_cycles",
+    "days_until", "variance_days", "day",
+    "window_start_day", "window_end_day", "predicted_peak_day",
+    "hours_remaining_estimate", "cycle_day",
+    "days_above_coverline_streak",
+})
+
+_FLOAT_FIELDS = frozenset({
+    "avg_cycle_length", "rolling_avg_length",
+    "coverline_temp", "coverline_value", "temperature_f",
+})
+
+
+def _coerce_int_fields(data: Any) -> None:
+    """Recursively coerce known numeric fields from strings to int/float."""
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key in _INT_FIELDS and value is not None:
+                try:
+                    data[key] = int(value)
+                except (ValueError, TypeError):
+                    pass
+            elif key in _FLOAT_FIELDS and value is not None:
+                try:
+                    data[key] = round(float(value), 2)
+                except (ValueError, TypeError):
+                    pass
+            elif isinstance(value, (dict, list)):
+                _coerce_int_fields(value)
+    elif isinstance(data, list):
+        for item in data:
+            _coerce_int_fields(item)
 
 
 def _analysis_context(state: dict[str, Any]) -> dict[str, Any]:

@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from ai.config import settings
+from ai.config import settings, snapshot_url_for, user_id_from_profile
 from ai.utils.llm_call import llm_call
 
 
@@ -27,7 +27,8 @@ Rules:
 
 def fetch_trying_to_conceive_data() -> dict[str, Any]:
     user_profile = _get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
-    snapshot = _get_backend_json(settings.CYCLE_ENGINE_SNAPSHOT_URL)
+    snapshot_url = snapshot_url_for(user_id_from_profile(user_profile))
+    snapshot = _get_backend_json(snapshot_url)
     trying_to_conceive = _generate_trying_to_conceive_analysis(user_profile, snapshot)
 
     return {
@@ -36,7 +37,7 @@ def fetch_trying_to_conceive_data() -> dict[str, Any]:
         "fetched": True,
         "sources": {
             "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
-            "snapshot": settings.CYCLE_ENGINE_SNAPSHOT_URL,
+            "snapshot": snapshot_url,
         },
         "trying_to_conceive": trying_to_conceive,
         "user_profile": user_profile,

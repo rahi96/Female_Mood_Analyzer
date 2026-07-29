@@ -11,7 +11,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnableLambda
 import httpx
 
-from ai.config import settings
+from ai.config import settings, snapshot_url_for, user_id_from_profile
 from ai.models.chat_models import (
     ChatDataSummary,
     ChatHistoryRequest,
@@ -210,13 +210,18 @@ def _fetch_lab_report_context() -> tuple[dict[str, Any] | None, str | None]:
         return None, str(exc)
 
 def _fetch_current_backend_context() -> tuple[dict[str, Any], dict[str, str]]:
-    sources = {
-        "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
-        "health_logs": settings.HEALTH_TRENDS_HEALTH_LOGS_URL,
-        "cycle_snapshot": settings.CYCLE_ENGINE_SNAPSHOT_URL,
-    }
     data: dict[str, Any] = {}
     errors: dict[str, str] = {}
+
+    profile, profile_error = _try_get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
+    data["user_profile"] = profile
+    if profile_error:
+        errors["user_profile"] = profile_error
+
+    sources = {
+        "health_logs": settings.HEALTH_TRENDS_HEALTH_LOGS_URL,
+        "cycle_snapshot": snapshot_url_for(user_id_from_profile(profile)),
+    }
     for name, url in sources.items():
         payload, error = _try_get_backend_json(url)
         data[name] = payload

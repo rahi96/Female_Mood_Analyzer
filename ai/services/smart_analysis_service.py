@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from ai.config import settings
+from ai.config import settings, snapshot_url_for, user_id_from_profile
 from ai.utils.llm_call import llm_call
 
 
@@ -26,13 +26,14 @@ Rules:
 
 
 def fetch_smart_analysis_data() -> dict[str, Any]:
+    user_profile, profile_error = _try_get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
+    snapshot_url = snapshot_url_for(user_id_from_profile(user_profile))
     sources = {
         "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
         "health_logs": settings.HEALTH_TRENDS_HEALTH_LOGS_URL,
-        "cycle_snapshot": settings.CYCLE_ENGINE_SNAPSHOT_URL,
+        "cycle_snapshot": snapshot_url,
         "skin_scans": settings.SKIN_SCANS_URL,
     }
-    user_profile, profile_error = _try_get_backend_json(sources["user_profile"])
     health_logs, health_logs_error = _try_get_backend_json(sources["health_logs"])
     cycle_snapshot, cycle_error = _try_get_backend_json(sources["cycle_snapshot"])
     skin_scans, skin_error = _try_get_backend_json(sources["skin_scans"])
