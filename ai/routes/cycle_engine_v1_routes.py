@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 
 from ai.models.cycle_engine_v1_models import (
-    BBTLogRequest,
     BBTUILogRequest,
     ConfirmDayRequest,
     ConsentRequest,
@@ -53,21 +52,6 @@ async def calendar_confirm_day(payload: ConfirmDayRequest, user_id: int = Query(
 @router.get("/calendar/next-period")
 async def calendar_next_period(user_id: int = Query(..., description="User ID")):
     return _run(service.calendar_next_period, user_id)
-
-
-@router.post("/bbt/log")
-async def bbt_log(payload: BBTLogRequest, user_id: int = Query(..., description="User ID")):
-    return _run(service.bbt_log, user_id, payload)
-
-
-@router.get("/bbt/chart")
-async def bbt_chart(user_id: int = Query(..., description="User ID"), cycle_day_range: str = "1-28"):
-    return _run(service.bbt_chart, user_id, cycle_day_range)
-
-
-@router.get("/bbt/coverline-status")
-async def bbt_coverline_status(user_id: int = Query(..., description="User ID")):
-    return _run(service.bbt_coverline_status, user_id)
 
 
 @router.get("/bbt/ui")
