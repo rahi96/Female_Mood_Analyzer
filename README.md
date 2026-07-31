@@ -30,5 +30,7 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 
 # Run with Docker Compose
-docker-compose up --build
+docker compose up --build
 ```
+
+The Docker Compose setup now builds the local image from this repository, so source changes are included when you rebuild.
