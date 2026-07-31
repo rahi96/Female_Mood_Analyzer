@@ -46,3 +46,11 @@ class OPKUILogRequest(BaseModel):
     opk_result: Optional[OPKResult] = None
     lh_value: Optional[float] = None
     mucus_type: Optional[MucusType] = None
+
+
+class BBTUILogRequest(BaseModel):
+    """Request to log BBT reading, returns full UI."""
+    date: Optional[date] = None  # Defaults to today if not provided
+    temperature_f: Optional[float] = Field(default=None, ge=90, le=110)
+    time: Optional[str] = None
+    flags: Optional[list[BBTFlag]] = None

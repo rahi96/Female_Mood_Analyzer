@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     PREMIUM_CHAT_LIMIT: int = 100
     SUBSCRIPTION_STATUS_PATH: str = "/user/subscription/{user_id}"
 
+    # MySQL Database
+    MYSQL_HOST: str = ""
+    MYSQL_PORT: int = 3306
+    MYSQL_USER: str = ""
+    MYSQL_PASSWORD: str = ""
+    MYSQL_DATABASE: str = ""
+
     @field_validator("DEBUG", mode="before")
     @classmethod
     def parse_debug(cls, value):

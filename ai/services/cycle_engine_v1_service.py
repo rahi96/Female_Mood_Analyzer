@@ -25,6 +25,7 @@ from ai.models.cycle_engine_v1_models import (
     OPKLogRequest,
     OPKUILogRequest,
 )
+from ai.utils.db import get_snapshot as get_db_snapshot
 from ai.utils.llm_call import llm_call
 
 
@@ -391,6 +392,195 @@ def bbt_coverline_status(user_id: int) -> dict[str, Any]:
         status,
         max_tokens=500,
     )
+
+
+# ---------------------------------------------------------------------------
+# BBT UI (§4.5)
+# ---------------------------------------------------------------------------
+
+def bbt_ui(user_id: int) -> dict[str, Any]:
+    """Full BBT page UI - single AI-generated response."""
+    state = _cycle_state(user_id)
+    _require_consent_if_needed(state)
+    
+    # Get cycle info
+    cycle_start = state["cycle_start_date"]
+    avg_length = state.get("avg_cycle_length", 28)
+    current_day = state["current_cycle_day"]
+    
+    # Compute coverline status
+    coverline = _coverline_status(state)
+    coverline_temp = coverline.get("coverline_temp")
+    confirmed = coverline.get("confirmed", False)
+    confirmed_day = coverline.get("confirmed_day")
+    
+    # Build chart points from BBT logs
+    bbt_logs = state.get("bbt_logs") or []
+    points = []
+    sorted_logs = sorted(bbt_logs, key=lambda item: item["date"])
+    
+    for log in sorted_logs:
+        log_date = _parse_date(log["date"])
+        cycle_day = (log_date - cycle_start).days + 1
+        if cycle_day < 1:
+            continue
+        flags = log.get("flags") or []
+        points.append({
+            "day": cycle_day,
+            "date": log["date"],
+            "temperature_f": float(log["temperature_f"]),
+            "is_excluded": bool(flags),
+            "flags": flags,
+        })
+    
+    # Determine cycle day range
+    end_day = max(current_day, int(round(avg_length)))
+    if points:
+        end_day = max(end_day, max(p["day"] for p in points))
+    
+    # Build title/subtitle
+    if confirmed and confirmed_day and coverline_temp:
+        subtitle = f"Coverline {coverline_temp}°F - shift confirmed Day {confirmed_day + 2}"
+    elif coverline_temp:
+        subtitle = f"Coverline {coverline_temp}°F - awaiting confirmation"
+    else:
+        subtitle = "Not enough data to calculate coverline"
+    
+    # Compute luteal length
+    luteal_length = None
+    if confirmed_day:
+        luteal_length = max(0, int(round(avg_length)) - confirmed_day)
+    
+    # Build algorithm steps
+    algorithm_steps = []
+    usable_logs = [p for p in points if not p["is_excluded"]]
+    
+    if len(usable_logs) >= 6:
+        baseline = usable_logs[:6]
+        baseline_days = [p["day"] for p in baseline]
+        algorithm_steps.append({
+            "checked": True,
+            "text": f"Coverline = highest of the 6 pre-shift low temps (Days {min(baseline_days)}-{max(baseline_days)}) → {coverline_temp}°F"
+        })
+    else:
+        algorithm_steps.append({
+            "checked": False,
+            "text": f"Need at least 6 unflagged temps for coverline (have {len(usable_logs)})"
+        })
+    
+    if coverline_temp:
+        threshold = coverline_temp + 0.2
+        algorithm_steps.append({
+            "checked": True,
+            "text": f"Shift requires 3 consecutive days ≥ 0.2°F above coverline (≥ {threshold}°F)"
+        })
+        
+        if confirmed and confirmed_day:
+            # Find the 3 confirming temps
+            shift_temps = []
+            for p in usable_logs[6:]:
+                if p["temperature_f"] >= threshold and len(shift_temps) < 3:
+                    shift_temps.append(p)
+                elif p["temperature_f"] < threshold:
+                    shift_temps = []
+            
+            if shift_temps:
+                temp_values = ", ".join(f"{p['temperature_f']}" for p in shift_temps[:3])
+                shift_day = shift_temps[0]["day"]
+                algorithm_steps.append({
+                    "checked": True,
+                    "text": f"Days {shift_day}-{shift_day + 2}: {temp_values} → shift confirmed Day {shift_day + 2} → Ovulation Day {confirmed_day}"
+                })
+        else:
+            algorithm_steps.append({
+                "checked": False,
+                "text": "Awaiting 3 consecutive days above threshold to confirm shift"
+            })
+    
+    # Phase label
+    phase = "Normal"
+    if luteal_length:
+        if luteal_length < 10:
+            phase = "Short luteal"
+        elif luteal_length > 16:
+            phase = "Long luteal"
+    
+    fallback = {
+        "bbt_chart": {
+            "title": f"BBT CHART — CYCLE DAY 1-{end_day}",
+            "subtitle": subtitle,
+            "points": points,
+            "coverline_value": coverline_temp,
+            "cycle_day_range": {"start": 1, "end": end_day},
+        },
+        "coverline_algorithm": {
+            "title": "COVERLINE ALGORITHM",
+            "steps": algorithm_steps,
+            "summary": {
+                "coverline": f"{coverline_temp}°F" if coverline_temp else None,
+                "luteal_length": f"{luteal_length}d" if luteal_length else None,
+                "phase": phase,
+            },
+        },
+    }
+    
+    return _ai_endpoint_response(
+        "bbt_ui",
+        state,
+        (
+            "Generate the complete BBT page UI JSON with these sections:\n"
+            "1. bbt_chart: {title, subtitle, points[], coverline_value, cycle_day_range{start, end}}\n"
+            "   - title: 'BBT CHART — CYCLE DAY 1-N'\n"
+            "   - subtitle: 'Coverline X°F - shift confirmed Day N' or 'awaiting confirmation'\n"
+            "   - points: [{day, date, temperature_f, is_excluded, flags[]}] for each logged BBT\n"
+            "   - coverline_value: the computed coverline temperature\n"
+            "2. coverline_algorithm: {title, steps[], summary{coverline, luteal_length, phase}}\n"
+            "   - title: 'COVERLINE ALGORITHM'\n"
+            "   - steps: [{checked: bool, text: string}] explaining the algorithm:\n"
+            "     * Step 1: Coverline = highest of 6 pre-shift low temps\n"
+            "     * Step 2: Shift requires 3 consecutive days ≥ 0.2°F above coverline\n"
+            "     * Step 3: Confirmation details with actual temps and ovulation day\n"
+            "   - summary: {coverline: 'X°F', luteal_length: 'Nd', phase: 'Normal/Short/Long'}\n"
+            "Use actual BBT logs from the data. Calculate coverline per standard rules."
+        ),
+        fallback,
+        max_tokens=2500,
+    )
+
+
+def bbt_ui_log(user_id: int, payload) -> dict[str, Any]:
+    """Log BBT reading, then return full BBT page UI."""
+    from ai.models.cycle_engine_v1_models import BBTUILogRequest
+    
+    state = _user_state(user_id)
+    log_date = payload.date or _today()
+    
+    # Log BBT if temperature provided
+    if payload.temperature_f is not None:
+        entry = {
+            "id": _next_id(state["bbt_logs"]),
+            "user_id": user_id,
+            "date": log_date.isoformat(),
+            "temperature_f": payload.temperature_f,
+            "logged_at_time": payload.time or _utc_now().strftime("%H:%M"),
+            "flags": list(payload.flags) if payload.flags else [],
+        }
+        # Replace existing log for same date
+        state["bbt_logs"] = [log for log in state["bbt_logs"] if log.get("date") != entry["date"]]
+        state["bbt_logs"].append(entry)
+        
+        # Update coverline status
+        cycle_state = _cycle_state(user_id)
+        coverline = _coverline_status(cycle_state)
+        if coverline.get("confirmed") and coverline.get("confirmed_day"):
+            state["bbt_confirmed_day"] = coverline["confirmed_day"]
+        
+        # Recompute reconciliation and clear caches
+        reconciliation_recompute(user_id)
+        _clear_ai_caches()
+    
+    # Return full UI (same as GET /bbt/ui)
+    return bbt_ui(user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1063,19 +1253,77 @@ def _user_state(user_id: int) -> dict[str, Any]:
 
 def _cycle_state(user_id: int) -> dict[str, Any]:
     user = _user_state(user_id)
-    profile, profile_error = _try_get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
-    snapshot_user_id = _extract_user_id(profile) or user_id
-    snapshot, snapshot_error = _try_get_backend_json(snapshot_url_for(snapshot_user_id))
 
-    backend_periods = _extract_period_logs(snapshot, profile, user_id)
-    backend_bbt = _extract_bbt_logs(snapshot, user_id)
-    backend_opk = _extract_opk_logs(snapshot, user_id)
-    backend_mucus = _extract_mucus_logs(snapshot, user_id)
+    # Fetch data directly from MySQL instead of HTTP
+    db_snapshot = get_db_snapshot(user_id)
+    profile = db_snapshot.get("profile")
+    current_cycle = db_snapshot.get("current_cycle")
+
+    # Convert MySQL bbt_logs to expected format
+    backend_bbt = []
+    for log in db_snapshot.get("bbt_logs") or []:
+        flags = []
+        if log.get("illness"):
+            flags.append("illness")
+        if log.get("poor_sleep"):
+            flags.append("low_sleep")
+        if log.get("alcohol"):
+            flags.append("alcohol")
+        if log.get("late_wakeup"):
+            flags.append("restless_sleep")
+        backend_bbt.append({
+            "id": log.get("id"),
+            "user_id": user_id,
+            "date": str(log.get("log_date"))[:10] if log.get("log_date") else None,
+            "temperature_f": float(log.get("temperature") or 0),
+            "logged_at_time": str(log.get("logged_at") or "06:00"),
+            "flags": flags,
+        })
+
+    # Convert MySQL opk_logs to expected format
+    backend_opk = []
+    for log in db_snapshot.get("opk_logs") or []:
+        backend_opk.append({
+            "id": log.get("id"),
+            "user_id": user_id,
+            "date": str(log.get("log_date"))[:10] if log.get("log_date") else None,
+            "result": log.get("result"),
+            "lh_value": float(log.get("lh_value")) if log.get("lh_value") else None,
+        })
+
+    # Convert MySQL mucus_logs to expected format
+    backend_mucus = []
+    for log in db_snapshot.get("mucus_logs") or []:
+        backend_mucus.append({
+            "id": log.get("id"),
+            "user_id": user_id,
+            "date": str(log.get("log_date"))[:10] if log.get("log_date") else None,
+            "type": log.get("consistency"),
+        })
+
+    # Convert MySQL period_logs to expected format
+    backend_periods = []
+    for log in db_snapshot.get("period_logs") or []:
+        backend_periods.append({
+            "id": log.get("id"),
+            "user_id": user_id,
+            "start_date": str(log.get("period_start_date"))[:10] if log.get("period_start_date") else None,
+            "end_date": str(log.get("period_end_date"))[:10] if log.get("period_end_date") else None,
+            "cycle_length": log.get("cycle_length"),
+        })
 
     period_logs = _merge_logs(backend_periods, user["period_logs"], key="start_date")
     bbt_logs = _merge_logs(backend_bbt, user["bbt_logs"], key="date")
     opk_logs = _merge_logs(backend_opk, user["opk_logs"], key="date")
     mucus_logs = _merge_logs(backend_mucus, user["mucus_logs"], key="date")
+
+    # Build snapshot-like dict for compatibility
+    snapshot = {
+        "current_cycle": current_cycle,
+        "bbt_logs": backend_bbt,
+        "opk_logs": backend_opk,
+        "mucus_logs": backend_mucus,
+    }
 
     cycle_start = _resolve_cycle_start(user, period_logs, snapshot, profile)
     avg_length = _extract_avg_cycle_length(snapshot, profile, period_logs)
@@ -1113,17 +1361,9 @@ def _cycle_state(user_id: int) -> dict[str, Any]:
         "lh_surge_at": user.get("lh_surge_at"),
         "offset_days": offset,
         "sources": {
-            "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
-            "snapshot": snapshot_url_for(snapshot_user_id),
+            "database": "mysql",
         },
-        "backend_errors": {
-            k: v
-            for k, v in {
-                "user_profile": profile_error,
-                "snapshot": snapshot_error,
-            }.items()
-            if v
-        },
+        "backend_errors": {},
         "profile": profile,
         "snapshot": snapshot,
         "_user": user,
