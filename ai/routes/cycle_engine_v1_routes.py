@@ -5,7 +5,6 @@ from ai.models.cycle_engine_v1_models import (
     ConfirmDayRequest,
     ConsentRequest,
     ModeRequest,
-    OPKLogRequest,
     OPKUILogRequest,
 )
 from ai.services import cycle_engine_v1_service as service
@@ -72,21 +71,6 @@ async def bbt_chart(cycle_day_range: str = "1-28", user_id: int = Depends(curren
 @router.get("/bbt/coverline-status")
 async def bbt_coverline_status(user_id: int = Depends(current_user_id)):
     return _run(service.bbt_coverline_status, user_id)
-
-
-@router.get("/opk/testing-window")
-async def opk_testing_window(user_id: int = Depends(current_user_id)):
-    return _run(service.opk_testing_window, user_id)
-
-
-@router.post("/opk/log")
-async def opk_log(payload: OPKLogRequest, user_id: int = Depends(current_user_id)):
-    return _run(service.opk_log, user_id, payload)
-
-
-@router.get("/opk/today-status")
-async def opk_today_status(user_id: int = Depends(current_user_id)):
-    return _run(service.opk_today_status, user_id)
 
 
 @router.get("/opk/ui")
