@@ -88,6 +88,11 @@ async def opk_today_status(user_id: int = Depends(current_user_id)):
     return _run(service.opk_today_status, user_id)
 
 
+@router.get("/opk/ui")
+async def opk_ui(user_id: int = Depends(current_user_id)):
+    return _run(service.opk_ui, user_id)
+
+
 @router.post("/reconciliation/recompute")
 async def reconciliation_recompute(user_id: int = Depends(current_user_id)):
     return _run(service.reconciliation_recompute, user_id)

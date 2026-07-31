@@ -509,6 +509,156 @@ def opk_today_status(user_id: int) -> dict[str, Any]:
     )
 
 
+def opk_ui(user_id: int) -> dict[str, Any]:
+    """Full OPK/LH page UI - single AI-generated response."""
+    state = _cycle_state(user_id)
+    _require_consent_if_needed(state)
+    today = _today()
+    reconciliation = _recompute_reconciliation(state)
+    
+    # Window calculations
+    peak = reconciliation["calendar_predicted_day"]
+    window_start = max(1, peak - OPK_WINDOW_LEAD_DAYS)
+    window_end = peak
+    current_day = state["current_cycle_day"]
+    
+    if current_day < window_start:
+        window_status = "not_open"
+    elif current_day > window_end:
+        window_status = "closed"
+    else:
+        window_status = "open"
+    
+    # Build testing window cards from logs
+    opk_logs = state.get("opk_logs") or []
+    opk_by_day = {}
+    for log in opk_logs:
+        if log.get("date"):
+            try:
+                log_date = _parse_date(log["date"])
+                day = _cycle_day_for_date(state, log_date)
+                opk_by_day[day] = log
+            except (ValueError, TypeError):
+                pass
+    
+    cards = []
+    for day in range(window_start, window_end + 1):
+        log = opk_by_day.get(day)
+        if log:
+            result = log.get("result", "not_tested")
+            symbol = "+" if result == "positive" else "-"
+        else:
+            result = "not_tested" if day < current_day else "unknown"
+            symbol = "-" if day < current_day else "?"
+        cards.append({
+            "cycle_day": day,
+            "label": f"D{day}",
+            "result": result,
+            "symbol": symbol,
+        })
+    
+    # Find LH surge day
+    lh_surge_day = reconciliation.get("lh_surge_day")
+    bbt_confirmed_day = reconciliation.get("bbt_confirmed_day")
+    
+    # Today's log
+    today_log = next((log for log in opk_logs if log.get("date") == today.isoformat()), None)
+    
+    # Today's mucus log
+    mucus_logs = state.get("mucus_logs") or []
+    today_mucus = next((log for log in mucus_logs if log.get("date") == today.isoformat()), None)
+    
+    # Build guidance based on window status
+    if window_status == "not_open":
+        guidance = f"Testing window opens on Day {window_start}. Start testing then for best accuracy."
+    elif window_status == "open":
+        guidance = "You're in the testing window. Test daily, same time each day, for accurate LH surge detection."
+    else:
+        guidance = "You're past the main testing window. OPK is less predictive post-ovulation — results here are logged for your record but won't affect this cycle's fertile window prediction."
+    
+    fallback = {
+        "info_alert": {
+            "title": "OPK is forward-looking",
+            "message": "In general, OPK is the only forward looking \"act now\" signal. A positive LH test means ovulation is expected within 12-36 hours. BBT only confirms ovulation after it has already occurred.",
+        },
+        "testing_window": {
+            "title": "Testing Window",
+            "subtitle": f"Days {window_start}-{window_end} - starts 4 days before predicted ovulation",
+            "status": window_status.replace("_", " ").title(),
+            "cards": cards,
+            "summary": {
+                "window": f"Days {window_start}-{window_end}",
+                "opk_peak": f"Day {lh_surge_day}" if lh_surge_day else None,
+                "bbt_confirmed": f"Day {bbt_confirmed_day}" if bbt_confirmed_day else None,
+            },
+        },
+        "lh_surge_detection": {
+            "detected": lh_surge_day is not None,
+            "title": f"LH Surge detected on Day {lh_surge_day}" if lh_surge_day else None,
+            "message": _build_surge_message(lh_surge_day, bbt_confirmed_day, peak) if lh_surge_day else None,
+            "surge_day": lh_surge_day,
+            "bbt_confirmed_day": bbt_confirmed_day,
+        },
+        "log_todays_test": {
+            "title": f"Log today's test - Day {current_day}",
+            "guidance": guidance,
+            "current_day": current_day,
+            "already_logged": today_log is not None,
+            "logged_result": today_log.get("result") if today_log else None,
+            "options": [
+                {"key": "negative", "label": "Negative", "symbol": "-", "description": "LH not elevated"},
+                {"key": "rising", "label": "Almost", "symbol": "-", "description": "LH rising"},
+                {"key": "positive", "label": "Positive", "symbol": "+", "description": "LH surge!"},
+            ],
+        },
+        "cervical_mucus": {
+            "title": "Cervical Mucus",
+            "description": "Supports OPK — lowest reliability alone, highest combined.",
+            "note": "Egg-white = peak fertility signal.",
+            "today_logged": today_mucus.get("type") if today_mucus else None,
+            "options": [
+                {"key": "dry", "label": "Dry", "description": "No moisture", "fertility": "Low fertility"},
+                {"key": "sticky", "label": "Sticky", "description": "Thick, crumbly", "fertility": "Low fertility"},
+                {"key": "creamy", "label": "Creamy", "description": "Lotion-like", "fertility": "Moderate"},
+                {"key": "watery", "label": "Watery", "description": "Clear, thin", "fertility": "High fertility"},
+                {"key": "egg_white", "label": "Egg white", "description": "Clear, stretchy", "fertility": "Peak fertility"},
+            ],
+        },
+    }
+    
+    return _ai_endpoint_response(
+        "opk_ui",
+        state,
+        (
+            "Generate the complete OPK/LH page UI JSON with these sections:\n"
+            "1. info_alert: {title, message} - educational text about OPK vs BBT, explain that OPK predicts ovulation 12-36 hours ahead while BBT confirms after.\n"
+            "2. testing_window: {title, subtitle, status, cards[], summary{window, opk_peak, bbt_confirmed}} - cards for each day in window with logged results.\n"
+            "3. lh_surge_detection: {detected, title, message, surge_day, bbt_confirmed_day} - if/when surge detected, explain any offset between predicted and confirmed ovulation.\n"
+            "4. log_todays_test: {title, guidance, current_day, already_logged, logged_result, options[]} - guidance based on window status (not_open/open/closed).\n"
+            "5. cervical_mucus: {title, description, note, today_logged, options[]} - 5 mucus types with fertility labels.\n"
+            "Use actual OPK logs and mucus logs from the data. Generate contextual guidance based on where user is in their cycle."
+        ),
+        fallback,
+        max_tokens=2500,
+    )
+
+
+def _build_surge_message(lh_surge_day: int | None, bbt_confirmed_day: int | None, predicted_day: int) -> str:
+    """Build LH surge detection message based on actual vs predicted ovulation."""
+    if not lh_surge_day:
+        return ""
+    expected_ov = lh_surge_day + 1  # Ovulation typically 24-36h after LH surge
+    if bbt_confirmed_day:
+        offset = bbt_confirmed_day - expected_ov
+        if offset == 0:
+            return f"Ovulation was expected Day {expected_ov}. BBT confirmed ovulation on Day {bbt_confirmed_day} as predicted."
+        else:
+            offset_text = f"{abs(offset)}-day offset noted"
+            return f"Ovulation was expected Day {expected_ov}. BBT confirmed actual ovulation Day {bbt_confirmed_day} ({offset_text})."
+    else:
+        return f"Ovulation expected Day {expected_ov} (12-36 hours after LH surge). Awaiting BBT confirmation."
+
+
 # ---------------------------------------------------------------------------
 # Reconciliation (§6)
 # ---------------------------------------------------------------------------
