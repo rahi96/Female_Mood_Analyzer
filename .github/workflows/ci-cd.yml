@@ -41,11 +41,11 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/bertrandpovere_ai:latest .
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/pulse_ai:latest .
 
       - name: Push Docker image
         run: |
-          docker push ${{ secrets.DOCKER_USERNAME }}/bertrandpovere_ai:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/pulse_ai:latest
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v0.1.5
