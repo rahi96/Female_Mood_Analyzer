@@ -9,3 +9,4 @@ langchain==1.2.15
 langchain-core==1.2.15
 pypdf==5.1.0
 python-multipart==0.0.20
+pymysql==1.1.1
