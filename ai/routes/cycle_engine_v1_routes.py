@@ -6,6 +6,7 @@ from ai.models.cycle_engine_v1_models import (
     ConsentRequest,
     ModeRequest,
     OPKLogRequest,
+    OPKUILogRequest,
 )
 from ai.services import cycle_engine_v1_service as service
 
@@ -91,6 +92,11 @@ async def opk_today_status(user_id: int = Depends(current_user_id)):
 @router.get("/opk/ui")
 async def opk_ui(user_id: int = Depends(current_user_id)):
     return _run(service.opk_ui, user_id)
+
+
+@router.post("/opk/ui")
+async def opk_ui_log(payload: OPKUILogRequest, user_id: int = Depends(current_user_id)):
+    return _run(service.opk_ui_log, user_id, payload)
 
 
 @router.post("/reconciliation/recompute")

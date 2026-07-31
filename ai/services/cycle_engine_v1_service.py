@@ -23,6 +23,7 @@ from ai.models.cycle_engine_v1_models import (
     ConsentRequest,
     ModeRequest,
     OPKLogRequest,
+    OPKUILogRequest,
 )
 from ai.utils.llm_call import llm_call
 
@@ -657,6 +658,61 @@ def _build_surge_message(lh_surge_day: int | None, bbt_confirmed_day: int | None
             return f"Ovulation was expected Day {expected_ov}. BBT confirmed actual ovulation Day {bbt_confirmed_day} ({offset_text})."
     else:
         return f"Ovulation expected Day {expected_ov} (12-36 hours after LH surge). Awaiting BBT confirmation."
+
+
+def opk_ui_log(user_id: int, payload: OPKUILogRequest) -> dict[str, Any]:
+    """Log OPK result and/or mucus type, then return full OPK/LH page UI."""
+    state = _user_state(user_id)
+    cycle_state = _cycle_state(user_id)
+    log_date = payload.date or _today()
+    
+    # Log OPK result if provided
+    if payload.opk_result:
+        reconciliation = _recompute_reconciliation(cycle_state)
+        peak = reconciliation["calendar_predicted_day"]
+        window_start = max(1, peak - OPK_WINDOW_LEAD_DAYS)
+        window_end = peak
+        cycle_day = _cycle_day_for_date(cycle_state, log_date)
+        outside_window = cycle_day < window_start or cycle_day > window_end
+        note = {
+            "negative": "LH not elevated",
+            "rising": "LH rising",
+            "positive": "LH surge detected",
+        }[payload.opk_result]
+        opk_entry = {
+            "id": _next_id(state["opk_logs"]),
+            "user_id": user_id,
+            "date": log_date.isoformat(),
+            "result": payload.opk_result,
+            "lh_value": payload.lh_value,
+            "note": note,
+            "outside_window": outside_window,
+            "affects_prediction": not outside_window or payload.opk_result == "positive",
+        }
+        state["opk_logs"] = [log for log in state["opk_logs"] if log.get("date") != opk_entry["date"]]
+        state["opk_logs"].append(opk_entry)
+        if payload.opk_result == "positive" and opk_entry["affects_prediction"]:
+            state["lh_surge_day"] = cycle_day
+            state["lh_surge_at"] = _utc_now().isoformat()
+    
+    # Log mucus type if provided
+    if payload.mucus_type:
+        mucus_entry = {
+            "id": _next_id(state.get("mucus_logs") or []),
+            "user_id": user_id,
+            "date": log_date.isoformat(),
+            "type": payload.mucus_type,
+        }
+        state["mucus_logs"] = [log for log in (state.get("mucus_logs") or []) if log.get("date") != mucus_entry["date"]]
+        state["mucus_logs"].append(mucus_entry)
+    
+    # Recompute reconciliation and clear caches
+    if payload.opk_result or payload.mucus_type:
+        reconciliation_recompute(user_id)
+        _clear_ai_caches()
+    
+    # Return full UI (same as GET /opk/ui)
+    return opk_ui(user_id)
 
 
 # ---------------------------------------------------------------------------

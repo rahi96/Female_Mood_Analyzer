@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from datetime import date
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -36,3 +38,11 @@ class ConsentRequest(BaseModel):
 
 class ModeRequest(BaseModel):
     mode: CycleMode
+
+
+class OPKUILogRequest(BaseModel):
+    """Request to log OPK result and/or mucus type, returns full UI."""
+    date: Optional[date] = None  # Defaults to today if not provided
+    opk_result: Optional[OPKResult] = None
+    lh_value: Optional[float] = None
+    mucus_type: Optional[MucusType] = None
