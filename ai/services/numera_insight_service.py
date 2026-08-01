@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from ai.config import settings
+from ai.utils.db import get_user_profile
 from ai.utils.llm_call import llm_call
 
 
@@ -24,25 +25,23 @@ Rules:
 """
 
 
-def fetch_numera_insight_data() -> dict[str, Any]:
-    user_profile, profile_error = _try_get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
-    backend_errors = {}
-    if profile_error:
-        backend_errors["user_profile"] = profile_error
-
+def fetch_numera_insight_data(user_id: int) -> dict[str, Any]:
+    user_profile = _serialize(get_user_profile(user_id))
     numera_insight = _generate_numera_insight(user_profile)
 
     return {
         "status": "ready",
         "service": "numera_insight",
-        "fetched": not backend_errors,
-        "sources": {
-            "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
-        },
-        "backend_errors": backend_errors,
+        "fetched": True,
+        "sources": {"database": "mysql"},
         "numera_insight": numera_insight,
         "user_profile": user_profile,
     }
+
+
+def _serialize(data: Any) -> Any:
+    """Convert DB rows (dates, decimals) to JSON-safe values."""
+    return json.loads(json.dumps(data, default=str)) if data is not None else None
 
 
 def _generate_numera_insight(user_profile: Any) -> dict[str, Any]:

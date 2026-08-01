@@ -9,8 +9,8 @@ router = APIRouter()
 
 
 @router.get("/health-trends")
-async def health_trends_endpoint(period: Literal["7d", "30d"] = Query("7d")):
+async def health_trends_endpoint(user_id: int = Query(..., description="User ID"), period: Literal["7d", "30d"] = Query("7d")):
     try:
-        return fetch_health_trends_data(period=period)
+        return fetch_health_trends_data(user_id, period=period)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Health trends failed: {exc}")

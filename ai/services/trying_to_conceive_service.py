@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from ai.config import settings, snapshot_url_for, user_id_from_profile
+from ai.utils.db import get_snapshot, get_user_profile
 from ai.utils.llm_call import llm_call
 
 
@@ -25,24 +26,25 @@ Rules:
 """
 
 
-def fetch_trying_to_conceive_data() -> dict[str, Any]:
-    user_profile = _get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
-    snapshot_url = snapshot_url_for(user_id_from_profile(user_profile))
-    snapshot = _get_backend_json(snapshot_url)
+def fetch_trying_to_conceive_data(user_id: int) -> dict[str, Any]:
+    user_profile = _serialize(get_user_profile(user_id))
+    snapshot = _serialize(get_snapshot(user_id))
     trying_to_conceive = _generate_trying_to_conceive_analysis(user_profile, snapshot)
 
     return {
         "status": "ready",
         "service": "trying_to_conceive",
         "fetched": True,
-        "sources": {
-            "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
-            "snapshot": snapshot_url,
-        },
+        "sources": {"database": "mysql"},
         "trying_to_conceive": trying_to_conceive,
         "user_profile": user_profile,
         "snapshot": snapshot,
     }
+
+
+def _serialize(data: Any) -> Any:
+    """Convert DB rows (dates, decimals) to JSON-safe values."""
+    return json.loads(json.dumps(data, default=str)) if data is not None else None
 
 
 def _generate_trying_to_conceive_analysis(user_profile: Any, snapshot: Any) -> dict[str, Any]:

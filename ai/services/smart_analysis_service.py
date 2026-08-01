@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from ai.config import settings, snapshot_url_for, user_id_from_profile
+from ai.utils.db import get_health_logs, get_skin_scans, get_snapshot, get_user_profile
 from ai.utils.llm_call import llm_call
 
 
@@ -25,28 +26,11 @@ Rules:
 """
 
 
-def fetch_smart_analysis_data() -> dict[str, Any]:
-    user_profile, profile_error = _try_get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
-    snapshot_url = snapshot_url_for(user_id_from_profile(user_profile))
-    sources = {
-        "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
-        "health_logs": settings.HEALTH_TRENDS_HEALTH_LOGS_URL,
-        "cycle_snapshot": snapshot_url,
-        "skin_scans": settings.SKIN_SCANS_URL,
-    }
-    health_logs, health_logs_error = _try_get_backend_json(sources["health_logs"])
-    cycle_snapshot, cycle_error = _try_get_backend_json(sources["cycle_snapshot"])
-    skin_scans, skin_error = _try_get_backend_json(sources["skin_scans"])
-
-    backend_errors = {}
-    if profile_error:
-        backend_errors["user_profile"] = profile_error
-    if health_logs_error:
-        backend_errors["health_logs"] = health_logs_error
-    if cycle_error:
-        backend_errors["cycle_snapshot"] = cycle_error
-    if skin_error:
-        backend_errors["skin_scans"] = skin_error
+def fetch_smart_analysis_data(user_id: int) -> dict[str, Any]:
+    user_profile = _serialize(get_user_profile(user_id))
+    health_logs = _serialize(get_health_logs(user_id))
+    cycle_snapshot = _serialize(get_snapshot(user_id))
+    skin_scans = _serialize(get_skin_scans(user_id))
 
     smart_analysis = _generate_smart_analysis(
         user_profile=user_profile,
@@ -58,15 +42,19 @@ def fetch_smart_analysis_data() -> dict[str, Any]:
     return {
         "status": "ready",
         "service": "smart_analysis",
-        "fetched": not backend_errors,
-        "sources": sources,
-        "backend_errors": backend_errors,
+        "fetched": True,
+        "sources": {"database": "mysql"},
         "smart_analysis": smart_analysis,
         "user_profile": user_profile,
         "health_logs": health_logs,
         "cycle_snapshot": cycle_snapshot,
         "skin_scans": skin_scans,
     }
+
+
+def _serialize(data: Any) -> Any:
+    """Convert DB rows (dates, decimals) to JSON-safe values."""
+    return json.loads(json.dumps(data, default=str)) if data is not None else None
 
 
 def _generate_smart_analysis(

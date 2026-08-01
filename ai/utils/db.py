@@ -124,6 +124,38 @@ def get_period_logs(user_id: int, limit: int = 12) -> list[dict[str, Any]]:
         return list(cursor.fetchall())
 
 
+def get_health_logs(user_id: int, limit: int = 60) -> list[dict[str, Any]]:
+    """Fetch health logs for user."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM health_logs
+            WHERE user_id = %s
+            ORDER BY log_date DESC
+            LIMIT %s
+            """,
+            (user_id, limit),
+        )
+        return list(cursor.fetchall())
+
+
+def get_skin_scans(user_id: int, limit: int = 20) -> list[dict[str, Any]]:
+    """Fetch skin scans for user."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM skin_scans
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (user_id, limit),
+        )
+        return list(cursor.fetchall())
+
+
 def get_lab_reports(user_id: int, limit: int = 50) -> list[dict[str, Any]]:
     """Fetch lab reports for user."""
     with get_connection() as conn:
