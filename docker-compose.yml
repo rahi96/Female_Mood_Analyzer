@@ -8,19 +8,7 @@ services:
       - .env
     ports:
       - "8002:8000"
-    environment:
-      MYSQL_PASSWORD: "Pul$$e2026_mysql"
-      QDRANT_URL: http://qdrant:6333
-      QDRANT_PATH: ""
-      QDRANT_COLLECTION_NAME: ${QDRANT_COLLECTION_NAME:-project_documents}
-      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-BAAI/bge-base-en-v1.5}
-      HYBRID_CANDIDATE_MULTIPLIER: ${HYBRID_CANDIDATE_MULTIPLIER:-4}
-      KEYWORD_SCAN_LIMIT: ${KEYWORD_SCAN_LIMIT:-500}
-    depends_on:
-      qdrant:
-        condition: service_started
     volumes:
-      - app_uploads:/app/uploads
       - app_data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
@@ -31,21 +19,8 @@ services:
     networks:
       - pulse_net
 
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: pulse_ai_qdrant
-    restart: unless-stopped
-    ports:
-      - "6333:6333"
-    volumes:
-      - qdrant_storage:/qdrant/storage
-    networks:
-      - pulse_net
-
 volumes:
-  app_uploads:
   app_data:
-  qdrant_storage:
 
 networks:
   pulse_net:

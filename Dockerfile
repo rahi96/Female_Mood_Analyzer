@@ -9,10 +9,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
 RUN python -m venv "$VENV_PATH" \
     && "$VENV_PATH/bin/pip" install --upgrade pip setuptools wheel
 
@@ -25,22 +21,17 @@ FROM python:3.12-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     VENV_PATH=/opt/venv \
-    PATH="/opt/venv/bin:$PATH" \
-    HF_HOME=/home/appuser/.cache/huggingface
+    PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 curl \
-    && rm -rf /var/lib/apt/lists/*
 
 RUN adduser --disabled-password --gecos "" appuser
 
 COPY --from=builder "$VENV_PATH" "$VENV_PATH"
 COPY --chown=appuser:appuser . .
 
-RUN mkdir -p uploads data /home/appuser/.cache/huggingface \
-    && chown -R appuser:appuser /app /home/appuser/.cache
+RUN mkdir -p data \
+    && chown -R appuser:appuser /app
 
 USER appuser
 
