@@ -172,7 +172,7 @@ def _fetch_chat_user_data(user_id: str, user_message: str) -> dict[str, Any]:
         user_data = fallback_data
 
     if _should_include_lab_report_context(user_message):
-        lab_report_context, lab_report_error = _fetch_lab_report_context()
+        lab_report_context, lab_report_error = _fetch_lab_report_context(user_id)
         user_data["lab_report_context"] = lab_report_context
         if lab_report_error:
             backend_errors = user_data.setdefault("backend_errors", {})
@@ -203,9 +203,13 @@ def _should_include_lab_report_context(message: str) -> bool:
     return any(marker in normalized for marker in markers)
 
 
-def _fetch_lab_report_context() -> tuple[dict[str, Any] | None, str | None]:
+def _fetch_lab_report_context(user_id: str) -> tuple[dict[str, Any] | None, str | None]:
     try:
-        return fetch_chat_lab_report_context(), None
+        # Convert user_id to int for database query
+        user_id_int = int(user_id) if user_id else None
+        if not user_id_int:
+            return None, "No user_id provided"
+        return fetch_chat_lab_report_context(user_id_int), None
     except Exception as exc:
         return None, str(exc)
 

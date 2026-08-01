@@ -16,6 +16,7 @@ from ai.models.pdf_summary_models import (
     PdfSummaryRequest,
     PdfSummaryResponse,
 )
+from ai.utils.db import get_lab_reports
 from ai.utils.llm_call import llm_call
 
 
@@ -38,14 +39,56 @@ Rules:
 """
 
 
-def summarize_pdf(request: PdfSummaryRequest | None = None) -> PdfSummaryResponse:
-    report_id = request.report_id if request else None
-    pdf_content, content_type, source, resolved_report_id = fetch_backend_pdf(report_id)
+def get_lab_reports_for_user(user_id: int) -> dict[str, Any]:
+    """Get all lab reports for a user from database."""
+    reports = get_lab_reports(user_id)
+    return {
+        "user_id": user_id,
+        "total": len(reports),
+        "reports": [
+            {
+                "id": r["id"],
+                "lab_report": r["lab_report"],
+                "panel": r["panel"],
+                "analysis_status": r["analysis_status"],
+                "created_at": str(r["created_at"]) if r.get("created_at") else None,
+            }
+            for r in reports
+        ],
+    }
+
+
+def summarize_pdf(user_id: int, report_id: int | None = None) -> PdfSummaryResponse:
+    """Summarize lab report PDF for a user from database."""
+    # Get lab reports from database
+    reports = get_lab_reports(user_id)
+    
+    if not reports:
+        raise ValueError(f"No lab reports found for user {user_id}")
+    
+    # Find specific report or use latest
+    if report_id:
+        report = next((r for r in reports if r["id"] == report_id), None)
+        if not report:
+            raise ValueError(f"Lab report {report_id} not found for user {user_id}")
+    else:
+        report = reports[0]  # Latest report
+    
+    # If report already has AI analysis, return it
+    if report.get("analysis_status") == "completed" and report.get("biomarkers"):
+        return _build_response_from_db(report)
+    
+    # Otherwise fetch PDF and analyze
+    pdf_path = report.get("lab_report")
+    if not pdf_path:
+        raise ValueError(f"No PDF file path for report {report['id']}")
+    
+    pdf_content, content_type, source = _fetch_pdf_from_storage(pdf_path)
     report_text = _extract_pdf_text(pdf_content)
     summary = _generate_hormonal_panel_summary(report_text)
 
     return PdfSummaryResponse(
-        report_id=resolved_report_id,
+        report_id=report["id"],
         source_path=source,
         content_type=content_type,
         file_size_bytes=len(pdf_content),
@@ -53,20 +96,104 @@ def summarize_pdf(request: PdfSummaryRequest | None = None) -> PdfSummaryRespons
         summary=summary,
     )
 
-def fetch_chat_lab_report_context(report_id: int | None = None) -> dict[str, Any]:
-    pdf_content, content_type, source, resolved_report_id = fetch_backend_pdf(report_id)
-    report_text = _extract_pdf_text(pdf_content)
-    clipped_text = report_text[:MAX_CHAT_PDF_TEXT_CHARS]
-    return {
-        "report_id": resolved_report_id,
-        "source_path": source,
-        "content_type": content_type,
-        "file_size_bytes": len(pdf_content),
-        "text_extracted": bool(report_text.strip()),
-        "extracted_text_characters": len(report_text),
-        "extracted_text_truncated": len(report_text) > MAX_CHAT_PDF_TEXT_CHARS,
-        "extracted_text": clipped_text,
-    }
+
+def _build_response_from_db(report: dict[str, Any]) -> PdfSummaryResponse:
+    """Build response from existing database analysis."""
+    biomarkers_data = report.get("biomarkers") or {}
+    ai_insights_data = report.get("ai_insights") or {}
+    next_steps_data = report.get("next_steps") or {}
+    
+    # Parse JSON if stored as string
+    if isinstance(biomarkers_data, str):
+        biomarkers_data = json.loads(biomarkers_data)
+    if isinstance(ai_insights_data, str):
+        ai_insights_data = json.loads(ai_insights_data)
+    if isinstance(next_steps_data, str):
+        next_steps_data = json.loads(next_steps_data)
+    
+    summary = HormonalPanelSummary(
+        panel=report.get("panel") or "Hormonal Panel",
+        biomarkers=HormoneBiomarkers(
+            needs_attention=[
+                HormoneBiomarker(**b) for b in biomarkers_data.get("needs_attention", [])
+            ],
+            normal_results=[
+                HormoneBiomarker(**b) for b in biomarkers_data.get("normal_results", [])
+            ],
+        ),
+        ai_insights=HormoneAiInsights(**ai_insights_data) if ai_insights_data else None,
+        next_steps=HormoneNextSteps(**next_steps_data) if next_steps_data else None,
+    )
+    
+    return PdfSummaryResponse(
+        report_id=report["id"],
+        source_path=report.get("lab_report"),
+        content_type="application/pdf",
+        file_size_bytes=0,
+        text_extracted=True,
+        summary=summary,
+    )
+
+
+def _fetch_pdf_from_storage(pdf_path: str) -> tuple[bytes, str, str]:
+    """Fetch PDF from Laravel storage via backend URL."""
+    # Construct full URL to fetch PDF from Laravel storage
+    base_url = settings.BACKEND_URL.rstrip("/")
+    # Remove /api/v1 suffix if present for storage URL
+    storage_base = base_url.rsplit("/api", 1)[0]
+    pdf_url = f"{storage_base}/storage/{pdf_path}"
+    
+    response = _get_backend_response(pdf_url)
+    content_type = response.headers.get("content-type", "application/pdf")
+    return response.content, content_type, pdf_url
+
+def fetch_chat_lab_report_context(user_id: int, report_id: int | None = None) -> dict[str, Any]:
+    """Fetch lab report context for chat from database."""
+    reports = get_lab_reports(user_id)
+    
+    if not reports:
+        return {
+            "report_id": None,
+            "error": f"No lab reports found for user {user_id}",
+        }
+    
+    # Find specific report or use latest
+    if report_id:
+        report = next((r for r in reports if r["id"] == report_id), None)
+        if not report:
+            return {
+                "report_id": report_id,
+                "error": f"Lab report {report_id} not found for user {user_id}",
+            }
+    else:
+        report = reports[0]
+    
+    pdf_path = report.get("lab_report")
+    if not pdf_path:
+        return {
+            "report_id": report["id"],
+            "error": "No PDF file path for report",
+        }
+    
+    try:
+        pdf_content, content_type, source = _fetch_pdf_from_storage(pdf_path)
+        report_text = _extract_pdf_text(pdf_content)
+        clipped_text = report_text[:MAX_CHAT_PDF_TEXT_CHARS]
+        return {
+            "report_id": report["id"],
+            "source_path": source,
+            "content_type": content_type,
+            "file_size_bytes": len(pdf_content),
+            "text_extracted": bool(report_text.strip()),
+            "extracted_text_characters": len(report_text),
+            "extracted_text_truncated": len(report_text) > MAX_CHAT_PDF_TEXT_CHARS,
+            "extracted_text": clipped_text,
+        }
+    except Exception as e:
+        return {
+            "report_id": report["id"],
+            "error": str(e),
+        }
 
 
 def fetch_backend_pdf(report_id: int | None = None) -> tuple[bytes, str, str, int | None]:
