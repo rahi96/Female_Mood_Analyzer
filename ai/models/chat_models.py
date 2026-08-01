@@ -10,9 +10,10 @@ class ChatMessage(BaseModel):
 
 
 class ChatResponseRequest(BaseModel):
-    user_id: str
+    user_id: int
     message: str = Field(..., min_length=1)
     session_id: Optional[str] = None
+    report_id: Optional[int] = None
 
 
 class ChatDataSummary(BaseModel):

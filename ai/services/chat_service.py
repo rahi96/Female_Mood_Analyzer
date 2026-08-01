@@ -158,11 +158,11 @@ CHAT_PROMPT = PromptTemplate.from_template(CHAT_MESSAGE_TEMPLATE)
 MEMORY_SUMMARY_PROMPT = PromptTemplate.from_template(MEMORY_SUMMARY_TEMPLATE)
 
 
-def _fetch_chat_user_data(user_id: str, user_message: str) -> dict[str, Any]:
+def _fetch_chat_user_data(user_id: int, user_message: str, report_id: int | None = None) -> dict[str, Any]:
     try:
         user_data = {
             "source": "legacy_temperature_backend",
-            "legacy_temperature_data": fetch_backend_data(user_id),
+            "legacy_temperature_data": fetch_backend_data(str(user_id)),
         }
     except Exception as exc:
         fallback_data, fallback_errors = _fetch_current_backend_context()
@@ -171,8 +171,9 @@ def _fetch_chat_user_data(user_id: str, user_message: str) -> dict[str, Any]:
         fallback_data["backend_errors"] = fallback_errors
         user_data = fallback_data
 
-    if _should_include_lab_report_context(user_message):
-        lab_report_context, lab_report_error = _fetch_lab_report_context(user_id)
+    # Always fetch lab report if report_id provided, or if message mentions lab/report
+    if report_id or _should_include_lab_report_context(user_message):
+        lab_report_context, lab_report_error = _fetch_lab_report_context(user_id, report_id)
         user_data["lab_report_context"] = lab_report_context
         if lab_report_error:
             backend_errors = user_data.setdefault("backend_errors", {})
@@ -203,13 +204,11 @@ def _should_include_lab_report_context(message: str) -> bool:
     return any(marker in normalized for marker in markers)
 
 
-def _fetch_lab_report_context(user_id: str) -> tuple[dict[str, Any] | None, str | None]:
+def _fetch_lab_report_context(user_id: int, report_id: int | None = None) -> tuple[dict[str, Any] | None, str | None]:
     try:
-        # Convert user_id to int for database query
-        user_id_int = int(user_id) if user_id else None
-        if not user_id_int:
+        if not user_id:
             return None, "No user_id provided"
-        return fetch_chat_lab_report_context(user_id_int), None
+        return fetch_chat_lab_report_context(user_id, report_id), None
     except Exception as exc:
         return None, str(exc)
 
@@ -266,12 +265,13 @@ def _current_backend_headers() -> dict[str, str]:
 def generate_chat_response(request: ChatResponseRequest) -> ChatResponse:
     session_id = request.session_id or str(uuid4())
     timestamp = _utc_timestamp()
+    user_id_str = str(request.user_id)
 
-    _enforce_chat_quota(request.user_id)
+    _enforce_chat_quota(user_id_str)
 
-    user_data = _fetch_chat_user_data(request.user_id, request.message)
-    history = _get_history(request.user_id, session_id)
-    long_term_memory = _get_long_term_memory(request.user_id)
+    user_data = _fetch_chat_user_data(request.user_id, request.message, request.report_id)
+    history = _get_history(user_id_str, session_id)
+    long_term_memory = _get_long_term_memory(user_id_str)
 
     response_text = _run_chat_chain(
         user_data=user_data,
@@ -282,17 +282,17 @@ def generate_chat_response(request: ChatResponseRequest) -> ChatResponse:
     response_text = _clean_response(response_text) or _fallback_response(user_data)
 
     _append_history(
-        request.user_id,
+        user_id_str,
         session_id,
         ConversationRecord(role="user", content=request.message, timestamp=timestamp),
     )
     _append_history(
-        request.user_id,
+        user_id_str,
         session_id,
         ConversationRecord(role="assistant", content=response_text, timestamp=_utc_timestamp()),
     )
-    _increment_chats_used(request.user_id)
-    _maybe_update_long_term_memory(request.user_id)
+    _increment_chats_used(user_id_str)
+    _maybe_update_long_term_memory(user_id_str)
 
     stats = _extract_temperature_stats(user_data)
 
