@@ -9,6 +9,7 @@ services:
     ports:
       - "8002:8000"
     environment:
+      MYSQL_PASSWORD: "Pul$$e2026_mysql"
       QDRANT_URL: http://qdrant:6333
       QDRANT_PATH: ""
       QDRANT_COLLECTION_NAME: ${QDRANT_COLLECTION_NAME:-project_documents}
