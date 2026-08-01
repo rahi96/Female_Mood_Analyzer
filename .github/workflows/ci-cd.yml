@@ -41,13 +41,17 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/pulse_ai:latest .
+          docker build --pull \
+            -t ${{ secrets.DOCKER_USERNAME }}/pulse_ai:latest \
+            -t ${{ secrets.DOCKER_USERNAME }}/pulse_ai:${{ github.sha }} .
 
       - name: Push Docker image
         run: |
           docker push ${{ secrets.DOCKER_USERNAME }}/pulse_ai:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/pulse_ai:${{ github.sha }}
 
       - name: Deploy to EC2
+        if: github.event_name == 'push'
         uses: appleboy/ssh-action@v0.1.5
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -55,8 +59,7 @@ jobs:
           key: ${{ secrets.EC2_PRIVATE_KEY }}
           script: |
             cd ~/ai
-            docker compose down
             docker compose pull
-            docker compose up -d
+            docker compose up -d --force-recreate
             docker container prune -f
             docker image prune -f
