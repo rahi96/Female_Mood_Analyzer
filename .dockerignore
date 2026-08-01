@@ -9,6 +9,7 @@ __pycache__
 
 .env
 .env.*
+*.env
 
 venv
 .venv
@@ -21,6 +22,8 @@ data
 *.sqlite
 *.sqlite3
 
+tests
+docs
 .coverage
 htmlcov
 *.log
