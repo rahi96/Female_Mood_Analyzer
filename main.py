@@ -8,7 +8,6 @@ from ai.routes import health_trends_routes
 from ai.routes import numera_insight_routes
 from ai.routes import skin_scan_routes
 from ai.routes import smart_analysis_routes
-from ai.routes import trying_to_conceive_routes
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -28,7 +27,6 @@ app.include_router(numera_insight_routes.router, prefix="/api", tags=["Numera_in
 app.include_router(chat_routes.router, prefix="/api", tags=["Chatbot_api's"])
 app.include_router(skin_scan_routes.router, prefix="/api", tags=["Skin_scan_api's"])
 app.include_router(smart_analysis_routes.router, prefix="/api", tags=["Smart_analysis_api's"])
-app.include_router(trying_to_conceive_routes.router, prefix="/api", tags=["Trying_to_conceive_api's"])
 
 
 @app.get("/health")
