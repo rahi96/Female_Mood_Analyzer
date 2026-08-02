@@ -63,17 +63,28 @@ def summarize_pdf(report_id: int) -> PdfSummaryResponse:
 
     The PDF is fetched from ``{LAB_REPORTS_URL}/{report_id}`` using the
     shared backend access token.  No per-user authentication is required.
+    Falls back gracefully to a standard summary if download or analysis fails.
     """
-    pdf_content, content_type, source = _fetch_pdf_from_backend_api(report_id)
-    report_text = _extract_pdf_text(pdf_content)
-    summary = _generate_hormonal_panel_summary(report_text)
+    try:
+        pdf_content, content_type, source = _fetch_pdf_from_backend_api(report_id)
+        report_text = _extract_pdf_text(pdf_content)
+        summary = _generate_hormonal_panel_summary(report_text)
+        text_extracted = bool(report_text.strip())
+        file_size = len(pdf_content)
+    except Exception as exc:
+        # Fallback gracefully if backend PDF is missing, inaccessible (403), or LLM fails
+        source = f"{settings.LAB_REPORTS_URL.rstrip('/')}/{report_id}"
+        content_type = "application/pdf"
+        file_size = 0
+        text_extracted = False
+        summary = _fallback_panel_summary(f"PDF download or analysis failed: {exc}")
 
     return PdfSummaryResponse(
         report_id=report_id,
         source_path=source,
         content_type=content_type,
-        file_size_bytes=len(pdf_content),
-        text_extracted=bool(report_text.strip()),
+        file_size_bytes=file_size,
+        text_extracted=text_extracted,
         summary=summary,
     )
 
