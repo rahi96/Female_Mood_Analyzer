@@ -78,12 +78,8 @@ def summarize_pdf(user_id: int, report_id: int | None = None) -> PdfSummaryRespo
     if report.get("analysis_status") == "completed" and report.get("biomarkers"):
         return _build_response_from_db(report)
     
-    # Otherwise fetch PDF and analyze
-    pdf_path = report.get("lab_report")
-    if not pdf_path:
-        raise ValueError(f"No PDF file path for report {report['id']}")
-    
-    pdf_content, content_type, source = _fetch_pdf_from_storage(pdf_path)
+    # Otherwise fetch PDF and analyze via the backend lab-reports API
+    pdf_content, content_type, source = _fetch_pdf_from_backend_api(report["id"])
     report_text = _extract_pdf_text(pdf_content)
     summary = _generate_hormonal_panel_summary(report_text)
 
@@ -135,17 +131,34 @@ def _build_response_from_db(report: dict[str, Any]) -> PdfSummaryResponse:
     )
 
 
-def _fetch_pdf_from_storage(pdf_path: str) -> tuple[bytes, str, str]:
-    """Fetch PDF from Laravel storage via backend URL."""
-    # Construct full URL to fetch PDF from Laravel storage
-    base_url = settings.BACKEND_URL.rstrip("/")
-    # Remove /api/v1 suffix if present for storage URL
-    storage_base = base_url.rsplit("/api", 1)[0]
-    pdf_url = f"{storage_base}/storage/{pdf_path}"
-    
-    response = _get_backend_response(pdf_url)
-    content_type = response.headers.get("content-type", "application/pdf")
-    return response.content, content_type, pdf_url
+def _fetch_pdf_from_backend_api(report_id: int) -> tuple[bytes, str, str]:
+    """Fetch PDF via the backend lab-reports-by-id API endpoint.
+
+    Uses GET {LAB_REPORTS_URL}/{report_id} (e.g.
+    https://api.fightthenumber.com/api/v1/lab-reports/3), which either
+    returns the raw PDF bytes directly, or a JSON payload containing a PDF
+    link that is then followed.
+    """
+    source = f"{settings.LAB_REPORTS_URL.rstrip('/')}/{report_id}"
+    response = _get_backend_response(source)
+    content_type = response.headers.get("content-type", "application/octet-stream")
+    content = response.content
+
+    if _is_pdf_response(content_type, content):
+        return content, content_type, source
+
+    if "json" not in content_type.lower():
+        raise ValueError("Backend lab-reports-by-id route did not return a PDF file")
+
+    pdf_source, _ = _extract_pdf_source(response.json(), report_id)
+    pdf_response = _get_backend_response(pdf_source)
+    pdf_content_type = pdf_response.headers.get("content-type", "application/octet-stream")
+    pdf_content = pdf_response.content
+
+    if not _is_pdf_response(pdf_content_type, pdf_content):
+        raise ValueError("Backend lab report link did not return a PDF file")
+
+    return pdf_content, pdf_content_type, pdf_source
 
 def fetch_chat_lab_report_context(user_id: int, report_id: int | None = None) -> dict[str, Any]:
     """Fetch lab report context for chat from database."""
@@ -168,15 +181,8 @@ def fetch_chat_lab_report_context(user_id: int, report_id: int | None = None) ->
     else:
         report = reports[0]
     
-    pdf_path = report.get("lab_report")
-    if not pdf_path:
-        return {
-            "report_id": report["id"],
-            "error": "No PDF file path for report",
-        }
-    
     try:
-        pdf_content, content_type, source = _fetch_pdf_from_storage(pdf_path)
+        pdf_content, content_type, source = _fetch_pdf_from_backend_api(report["id"])
         report_text = _extract_pdf_text(pdf_content)
         clipped_text = report_text[:MAX_CHAT_PDF_TEXT_CHARS]
         return {
@@ -603,12 +609,19 @@ def _is_allowed_backend_url(url: str) -> bool:
 
     parsed = urlparse(url)
     lab_reports = urlparse(settings.LAB_REPORTS_URL)
-    return (
-        parsed.scheme in {"http", "https"}
-        and parsed.netloc == lab_reports.netloc
-        and parsed.path.startswith("/storage/")
-        and parsed.path.lower().endswith(".pdf")
-    )
+    if parsed.scheme not in {"http", "https"} or parsed.netloc != lab_reports.netloc:
+        return False
+
+    # Raw storage file URLs, e.g. /storage/lab_reports/xyz.pdf
+    if parsed.path.startswith("/storage/") and parsed.path.lower().endswith(".pdf"):
+        return True
+
+    # Per-report API URLs, e.g. /api/v1/lab-reports/3
+    lab_reports_path = lab_reports.path.rstrip("/")
+    if parsed.path == lab_reports_path or parsed.path.startswith(f"{lab_reports_path}/"):
+        return True
+
+    return False
 
 
 def _lab_reports_origin() -> str:
