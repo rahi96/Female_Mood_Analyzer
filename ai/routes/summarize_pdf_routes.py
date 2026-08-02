@@ -1,42 +1,28 @@
-from typing import Optional
-
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from ai.models.pdf_summary_models import PdfSummaryResponse
-from ai.services.pdf_summary_service import summarize_pdf, get_lab_reports_for_user
+from ai.services.pdf_summary_service import get_lab_reports_for_user, summarize_pdf
 
 
 router = APIRouter()
 
 
-def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
-    """Extract the raw token from an `Authorization: Bearer <token>` header."""
-    if not authorization:
-        return None
-    parts = authorization.split(" ", 1)
-    if len(parts) == 2 and parts[0].lower() == "bearer":
-        return parts[1]
-    return authorization
-
-
 @router.get("/summarize-pdf", response_model=PdfSummaryResponse)
 async def summarize_pdf_get(
-    user_id: int = Query(..., description="User ID"),
-    authorization: Optional[str] = Header(None, description="User's own Bearer token, forwarded to the backend"),
+    report_id: int = Query(..., description="Lab report ID"),
 ):
     try:
-        return summarize_pdf(user_id, access_token=_extract_bearer_token(authorization))
+        return summarize_pdf(report_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"PDF summary failed: {exc}")
 
 
 @router.post("/summarize-pdf", response_model=PdfSummaryResponse)
 async def summarize_pdf_post(
-    user_id: int = Query(..., description="User ID"),
-    authorization: Optional[str] = Header(None, description="User's own Bearer token, forwarded to the backend"),
+    report_id: int = Query(..., description="Lab report ID"),
 ):
     try:
-        return summarize_pdf(user_id, access_token=_extract_bearer_token(authorization))
+        return summarize_pdf(report_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"PDF summary failed: {exc}")
 

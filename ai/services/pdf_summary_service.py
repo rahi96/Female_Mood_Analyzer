@@ -58,43 +58,18 @@ def get_lab_reports_for_user(user_id: int) -> dict[str, Any]:
     }
 
 
-def summarize_pdf(
-    user_id: int,
-    report_id: int | None = None,
-    access_token: str | None = None,
-) -> PdfSummaryResponse:
-    """Summarize lab report PDF for a user from database.
+def summarize_pdf(report_id: int) -> PdfSummaryResponse:
+    """Fetch and summarize a lab report PDF by its backend report ID.
 
-    access_token: the requesting user's own Laravel Sanctum token (forwarded
-    by the backend/client). Each user has their own token, so a single
-    shared BACKEND_ACCESS_TOKEN cannot fetch every user's private files.
-    Falls back to the static BACKEND_ACCESS_TOKEN only if none is provided.
+    The PDF is fetched from ``{LAB_REPORTS_URL}/{report_id}`` using the
+    shared backend access token.  No per-user authentication is required.
     """
-    # Get lab reports from database
-    reports = get_lab_reports(user_id)
-    
-    if not reports:
-        raise ValueError(f"No lab reports found for user {user_id}")
-    
-    # Find specific report or use latest
-    if report_id:
-        report = next((r for r in reports if r["id"] == report_id), None)
-        if not report:
-            raise ValueError(f"Lab report {report_id} not found for user {user_id}")
-    else:
-        report = reports[0]  # Latest report
-    
-    # If report already has AI analysis, return it
-    if report.get("analysis_status") == "completed" and report.get("biomarkers"):
-        return _build_response_from_db(report)
-    
-    # Otherwise fetch PDF and analyze via the backend lab-reports API
-    pdf_content, content_type, source = _fetch_pdf_from_backend_api(report["id"], access_token)
+    pdf_content, content_type, source = _fetch_pdf_from_backend_api(report_id)
     report_text = _extract_pdf_text(pdf_content)
     summary = _generate_hormonal_panel_summary(report_text)
 
     return PdfSummaryResponse(
-        report_id=report["id"],
+        report_id=report_id,
         source_path=source,
         content_type=content_type,
         file_size_bytes=len(pdf_content),
