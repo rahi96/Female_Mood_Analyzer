@@ -14,6 +14,7 @@ class ChatResponseRequest(BaseModel):
     message: str = Field(..., min_length=1)
     session_id: Optional[str] = None
     report_id: Optional[int] = None
+    access_token: Optional[str] = None
 
 
 class ChatDataSummary(BaseModel):

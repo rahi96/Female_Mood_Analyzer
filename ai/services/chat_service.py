@@ -158,7 +158,12 @@ CHAT_PROMPT = PromptTemplate.from_template(CHAT_MESSAGE_TEMPLATE)
 MEMORY_SUMMARY_PROMPT = PromptTemplate.from_template(MEMORY_SUMMARY_TEMPLATE)
 
 
-def _fetch_chat_user_data(user_id: int, user_message: str, report_id: int | None = None) -> dict[str, Any]:
+def _fetch_chat_user_data(
+    user_id: int,
+    user_message: str,
+    report_id: int | None = None,
+    access_token: str | None = None,
+) -> dict[str, Any]:
     try:
         user_data = {
             "source": "legacy_temperature_backend",
@@ -173,7 +178,7 @@ def _fetch_chat_user_data(user_id: int, user_message: str, report_id: int | None
 
     # Always fetch lab report if report_id provided, or if message mentions lab/report
     if report_id or _should_include_lab_report_context(user_message):
-        lab_report_context, lab_report_error = _fetch_lab_report_context(user_id, report_id)
+        lab_report_context, lab_report_error = _fetch_lab_report_context(user_id, report_id, access_token)
         user_data["lab_report_context"] = lab_report_context
         if lab_report_error:
             backend_errors = user_data.setdefault("backend_errors", {})
@@ -204,11 +209,15 @@ def _should_include_lab_report_context(message: str) -> bool:
     return any(marker in normalized for marker in markers)
 
 
-def _fetch_lab_report_context(user_id: int, report_id: int | None = None) -> tuple[dict[str, Any] | None, str | None]:
+def _fetch_lab_report_context(
+    user_id: int,
+    report_id: int | None = None,
+    access_token: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
     try:
         if not user_id:
             return None, "No user_id provided"
-        return fetch_chat_lab_report_context(user_id, report_id), None
+        return fetch_chat_lab_report_context(user_id, report_id, access_token), None
     except Exception as exc:
         return None, str(exc)
 
@@ -269,7 +278,7 @@ def generate_chat_response(request: ChatResponseRequest) -> ChatResponse:
 
     _enforce_chat_quota(user_id_str)
 
-    user_data = _fetch_chat_user_data(request.user_id, request.message, request.report_id)
+    user_data = _fetch_chat_user_data(request.user_id, request.message, request.report_id, request.access_token)
     history = _get_history(user_id_str, session_id)
     long_term_memory = _get_long_term_memory(user_id_str)
 

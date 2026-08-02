@@ -58,8 +58,18 @@ def get_lab_reports_for_user(user_id: int) -> dict[str, Any]:
     }
 
 
-def summarize_pdf(user_id: int, report_id: int | None = None) -> PdfSummaryResponse:
-    """Summarize lab report PDF for a user from database."""
+def summarize_pdf(
+    user_id: int,
+    report_id: int | None = None,
+    access_token: str | None = None,
+) -> PdfSummaryResponse:
+    """Summarize lab report PDF for a user from database.
+
+    access_token: the requesting user's own Laravel Sanctum token (forwarded
+    by the backend/client). Each user has their own token, so a single
+    shared BACKEND_ACCESS_TOKEN cannot fetch every user's private files.
+    Falls back to the static BACKEND_ACCESS_TOKEN only if none is provided.
+    """
     # Get lab reports from database
     reports = get_lab_reports(user_id)
     
@@ -79,7 +89,7 @@ def summarize_pdf(user_id: int, report_id: int | None = None) -> PdfSummaryRespo
         return _build_response_from_db(report)
     
     # Otherwise fetch PDF and analyze via the backend lab-reports API
-    pdf_content, content_type, source = _fetch_pdf_from_backend_api(report["id"])
+    pdf_content, content_type, source = _fetch_pdf_from_backend_api(report["id"], access_token)
     report_text = _extract_pdf_text(pdf_content)
     summary = _generate_hormonal_panel_summary(report_text)
 
@@ -131,16 +141,20 @@ def _build_response_from_db(report: dict[str, Any]) -> PdfSummaryResponse:
     )
 
 
-def _fetch_pdf_from_backend_api(report_id: int) -> tuple[bytes, str, str]:
+def _fetch_pdf_from_backend_api(
+    report_id: int,
+    access_token: str | None = None,
+) -> tuple[bytes, str, str]:
     """Fetch PDF via the backend lab-reports-by-id API endpoint.
 
     Uses GET {LAB_REPORTS_URL}/{report_id} (e.g.
     https://api.fightthenumber.com/api/v1/lab-reports/3), which either
     returns the raw PDF bytes directly, or a JSON payload containing a PDF
-    link that is then followed.
+    link that is then followed. Pass the requesting user's own access_token
+    since lab reports are private to each user.
     """
     source = f"{settings.LAB_REPORTS_URL.rstrip('/')}/{report_id}"
-    response = _get_backend_response(source)
+    response = _get_backend_response(source, access_token)
     content_type = response.headers.get("content-type", "application/octet-stream")
     content = response.content
 
@@ -151,7 +165,7 @@ def _fetch_pdf_from_backend_api(report_id: int) -> tuple[bytes, str, str]:
         raise ValueError("Backend lab-reports-by-id route did not return a PDF file")
 
     pdf_source, _ = _extract_pdf_source(response.json(), report_id)
-    pdf_response = _get_backend_response(pdf_source)
+    pdf_response = _get_backend_response(pdf_source, access_token)
     pdf_content_type = pdf_response.headers.get("content-type", "application/octet-stream")
     pdf_content = pdf_response.content
 
@@ -160,8 +174,16 @@ def _fetch_pdf_from_backend_api(report_id: int) -> tuple[bytes, str, str]:
 
     return pdf_content, pdf_content_type, pdf_source
 
-def fetch_chat_lab_report_context(user_id: int, report_id: int | None = None) -> dict[str, Any]:
-    """Fetch lab report context for chat from database."""
+def fetch_chat_lab_report_context(
+    user_id: int,
+    report_id: int | None = None,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """Fetch lab report context for chat from database.
+
+    access_token: the requesting user's own Laravel Sanctum token, forwarded
+    per-request since each user's lab reports require their own token.
+    """
     reports = get_lab_reports(user_id)
     
     if not reports:
@@ -182,7 +204,7 @@ def fetch_chat_lab_report_context(user_id: int, report_id: int | None = None) ->
         report = reports[0]
     
     try:
-        pdf_content, content_type, source = _fetch_pdf_from_backend_api(report["id"])
+        pdf_content, content_type, source = _fetch_pdf_from_backend_api(report["id"], access_token)
         report_text = _extract_pdf_text(pdf_content)
         clipped_text = report_text[:MAX_CHAT_PDF_TEXT_CHARS]
         return {
@@ -496,21 +518,23 @@ def _extract_pdf_text(pdf_content: bytes) -> str:
     return "\n\n".join(page for page in pages if page).strip()
 
 
-def _get_backend_response(path: str) -> httpx.Response:
+def _get_backend_response(path: str, access_token: str | None = None) -> httpx.Response:
     url = _backend_url(path)
 
-    response = httpx.get(url, headers=_backend_headers(), timeout=30.0, follow_redirects=True)
+    response = httpx.get(url, headers=_backend_headers(access_token), timeout=30.0, follow_redirects=True)
     response.raise_for_status()
     return response
 
 
-def _backend_headers() -> dict[str, str]:
+def _backend_headers(access_token: str | None = None) -> dict[str, str]:
     headers = {
         "Accept": "application/json",
         "ngrok-skip-browser-warning": "true",
     }
 
-    token = settings.CYCLE_ENGINE_ACCESS_TOKEN or settings.BACKEND_ACCESS_TOKEN
+    # Prefer the requesting user's own token (each user has their own
+    # Sanctum token) and only fall back to the shared static token.
+    token = access_token or settings.CYCLE_ENGINE_ACCESS_TOKEN or settings.BACKEND_ACCESS_TOKEN
     if token:
         headers["Authorization"] = f"Bearer {token}"
         headers["access-token"] = token
