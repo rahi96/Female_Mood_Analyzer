@@ -1398,12 +1398,11 @@ def _fetch_cycle_calendar_periods(user_id: int) -> tuple[list[dict[str, Any]], s
             }
         )
 
-    if not periods:
-        raise CycleCalendarNotFoundError(
-            f"No cycle calendar inputs found for user {user_id}"
-        )
-
-    periods.sort(key=lambda item: item["start_date"])
+    # Return empty list if no calendar data - system will use defaults
+    # When calendar data exists, use it exactly as received from backend
+    if periods:
+        periods.sort(key=lambda item: item["start_date"])
+    
     return periods, source_url
 
 
