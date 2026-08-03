@@ -59,6 +59,7 @@ jobs:
           key: ${{ secrets.EC2_PRIVATE_KEY }}
           script: |
             cd ~/ai
+            git pull origin main
             docker compose pull
             docker compose up -d --force-recreate
             docker container prune -f
