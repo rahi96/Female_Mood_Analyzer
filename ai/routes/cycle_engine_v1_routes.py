@@ -2,7 +2,6 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ai.models.cycle_engine_v1_models import (
     BBTUILogRequest,
-    ConfirmDayRequest,
     ConsentRequest,
     ModeRequest,
     OPKUILogRequest,
@@ -16,6 +15,10 @@ router = APIRouter()
 def _run(handler, *args, **kwargs):
     try:
         return handler(*args, **kwargs)
+    except service.CycleCalendarNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except service.CycleCalendarBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
     except service.ConsentRequiredError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValueError as exc:
@@ -40,13 +43,8 @@ async def engine_discrepancy_note(user_id: int = Query(..., description="User ID
 
 
 @router.get("/calendar/month")
-async def calendar_month(user_id: int = Query(..., description="User ID"), month: str = Query(..., pattern=r"^\d{4}-\d{2}$")):
-    return _run(service.calendar_month, user_id, month)
-
-
-@router.post("/calendar/confirm-day")
-async def calendar_confirm_day(payload: ConfirmDayRequest, user_id: int = Query(..., description="User ID")):
-    return _run(service.calendar_confirm_day, user_id, payload)
+async def calendar_month(user_id: int = Query(..., ge=1, description="User ID")):
+    return _run(service.calendar_month, user_id)
 
 
 @router.get("/calendar/next-period")

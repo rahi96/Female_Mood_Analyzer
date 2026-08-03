@@ -25,7 +25,7 @@ from ai.models.cycle_engine_v1_models import (
     OPKLogRequest,
     OPKUILogRequest,
 )
-from ai.utils.db import get_snapshot as get_db_snapshot
+from ai.utils.db import fetch_calendar_inputs_from_backend, get_snapshot as get_db_snapshot
 from ai.utils.llm_call import llm_call
 
 
@@ -80,6 +80,18 @@ _USER_STATE: dict[int, dict[str, Any]] = {}
 
 
 class ConsentRequiredError(Exception):
+    pass
+
+
+class CycleCalendarBackendError(RuntimeError):
+    """Raised when the source-of-truth cycle calendar cannot be loaded."""
+
+    pass
+
+
+class CycleCalendarNotFoundError(ValueError):
+    """Raised when a user has no backend calendar inputs yet."""
+
     pass
 
 
@@ -204,53 +216,12 @@ def engine_discrepancy_note(user_id: int) -> dict[str, Any]:
 # Calendar (§3)
 # ---------------------------------------------------------------------------
 
-def calendar_month(user_id: int, month: str) -> dict[str, Any]:
-    state = _cycle_state(user_id)
-    _require_consent_if_needed(state)
-    year, month_number = [int(part) for part in month.split("-")]
-    _, days_in_month = monthrange(year, month_number)
-    reconciliation = _recompute_reconciliation(state)
-    fertile_start, fertile_end = _fertile_window(reconciliation["calendar_predicted_day"])
-    period_days = set(_period_cycle_days(state))
-    cycle_length = int(round(state["avg_cycle_length"]))
-    days = []
-    for day_number in range(1, days_in_month + 1):
-        current = date(year, month_number, day_number)
-        cycle_day = _cycle_day_for_date(state, current)
-        in_cycle = 1 <= cycle_day <= cycle_length + 7
-        tag = "none"
-        if in_cycle:
-            if cycle_day in period_days:
-                tag = "period"
-            elif reconciliation.get("final_confirmed_day") == cycle_day:
-                tag = "ovulation_confirmed"
-            elif reconciliation["calendar_predicted_day"] == cycle_day:
-                tag = "ovulation_predicted"
-            elif fertile_start <= cycle_day <= fertile_end:
-                tag = "fertile_window"
-            elif _phase_for_day(cycle_day, state["avg_cycle_length"]) == "luteal":
-                tag = "luteal"
-        days.append(
-            {
-                "date": current.isoformat(),
-                "cycle_day": cycle_day if in_cycle else None,
-                "tag": tag,
-            }
-        )
-    fallback = {"month": month, "days": days}
-    return _ai_endpoint_response(
-        f"calendar_month:{month}",
-        state,
-        (
-            f"Build calendar month JSON for {month}. "
-            "Return {month, days:[{date, cycle_day|null, tag}]}. "
-            "tag must be one of: period, fertile_window, ovulation_predicted, "
-            "ovulation_confirmed, luteal, none. "
-            "Include every day of the month. Use profile/snapshot period and ovulation data."
-        ),
-        fallback,
-        max_tokens=2500,
-    )
+def calendar_month(user_id: int) -> dict[str, Any]:
+    """
+    Fetch cycle calendar inputs from backend.
+    Returns raw backend response with calendar input data (start_date, end_date, etc).
+    """
+    return fetch_calendar_inputs_from_backend(user_id)
 
 
 def calendar_confirm_day(user_id: int, payload: ConfirmDayRequest) -> dict[str, Any]:
@@ -1254,6 +1225,8 @@ def _user_state(user_id: int) -> dict[str, Any]:
 def _cycle_state(user_id: int) -> dict[str, Any]:
     user = _user_state(user_id)
 
+    calendar_periods, calendar_source = _fetch_cycle_calendar_periods(user_id)
+
     # Fetch data directly from MySQL instead of HTTP
     db_snapshot = get_db_snapshot(user_id)
     profile = db_snapshot.get("profile")
@@ -1305,19 +1278,9 @@ def _cycle_state(user_id: int) -> dict[str, Any]:
     # Skip rows without a period_start_date (e.g. calendar-only cycles that
     # haven't logged an actual period yet) so downstream date parsing never
     # sees a None value.
-    backend_periods = []
-    for log in db_snapshot.get("period_logs") or []:
-        if not log.get("period_start_date"):
-            continue
-        backend_periods.append({
-            "id": log.get("id"),
-            "user_id": user_id,
-            "start_date": str(log.get("period_start_date"))[:10],
-            "end_date": str(log.get("period_end_date"))[:10] if log.get("period_end_date") else None,
-            "cycle_length": log.get("cycle_length"),
-        })
+    backend_periods = calendar_periods
 
-    period_logs = _merge_logs(backend_periods, user["period_logs"], key="start_date")
+    period_logs = backend_periods
     bbt_logs = _merge_logs(backend_bbt, user["bbt_logs"], key="date")
     opk_logs = _merge_logs(backend_opk, user["opk_logs"], key="date")
     mucus_logs = _merge_logs(backend_mucus, user["mucus_logs"], key="date")
@@ -1367,6 +1330,7 @@ def _cycle_state(user_id: int) -> dict[str, Any]:
         "offset_days": offset,
         "sources": {
             "database": "mysql",
+            "cycle_calendar": calendar_source,
         },
         "backend_errors": {},
         "profile": profile,
@@ -1374,6 +1338,73 @@ def _cycle_state(user_id: int) -> dict[str, Any]:
         "_user": user,
     }
     return state
+
+
+def _fetch_cycle_calendar_periods(user_id: int) -> tuple[list[dict[str, Any]], str]:
+    base_url = settings.CYCLE_CALENDAR_INPUTS_URL.rstrip("/")
+    source_url = f"{base_url}/{user_id}"
+    try:
+        response = httpx.get(
+            source_url,
+            headers={"Accept": "application/json"},
+            timeout=30.0,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        raise CycleCalendarBackendError(
+            f"Unable to load cycle calendar inputs for user {user_id}"
+        ) from exc
+
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise CycleCalendarBackendError(
+            f"Cycle calendar backend returned an invalid response for user {user_id}"
+        )
+
+    records = payload.get("data")
+    if not isinstance(records, list):
+        raise CycleCalendarBackendError("Cycle calendar backend data must be a list")
+
+    periods: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise CycleCalendarBackendError("Cycle calendar record must be an object")
+
+        record_user_id = record.get("user_id")
+        if str(record_user_id) != str(user_id):
+            raise CycleCalendarBackendError("Cycle calendar response contained another user's data")
+
+        raw_start = record.get("start_date")
+        if not raw_start:
+            raise CycleCalendarBackendError("Cycle calendar record is missing start_date")
+
+        try:
+            start_date = _parse_date(str(raw_start)[:10])
+            raw_end = record.get("end_date")
+            end_date = _parse_date(str(raw_end)[:10]) if raw_end else None
+        except (TypeError, ValueError) as exc:
+            raise CycleCalendarBackendError("Cycle calendar record contains an invalid date") from exc
+
+        if end_date is not None and end_date < start_date:
+            raise CycleCalendarBackendError("Cycle calendar end_date cannot precede start_date")
+
+        periods.append(
+            {
+                "id": record.get("id"),
+                "user_id": user_id,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat() if end_date else None,
+            }
+        )
+
+    if not periods:
+        raise CycleCalendarNotFoundError(
+            f"No cycle calendar inputs found for user {user_id}"
+        )
+
+    periods.sort(key=lambda item: item["start_date"])
+    return periods, source_url
 
 
 def _cycle_summary(state: dict[str, Any]) -> dict[str, Any]:
@@ -1534,6 +1565,26 @@ def _phase_day_range(phase: str, avg_length: float) -> str:
 
 def _cycle_day_for_date(state: dict[str, Any], value: date) -> int:
     return (value - state["cycle_start_date"]).days + 1
+
+
+def _calendar_cycle_day(period_logs: list[dict[str, Any]], value: date) -> int | None:
+    starts = [
+        _parse_date(log["start_date"])
+        for log in period_logs
+        if log.get("start_date") and _parse_date(log["start_date"]) <= value
+    ]
+    if not starts:
+        return None
+    return (value - max(starts)).days + 1
+
+
+def _is_period_date(period_logs: list[dict[str, Any]], value: date) -> bool:
+    for log in period_logs:
+        start = _parse_date(log["start_date"])
+        end = _parse_date(log["end_date"]) if log.get("end_date") else start
+        if start <= value <= end:
+            return True
+    return False
 
 
 def _period_cycle_days(state: dict[str, Any]) -> list[int]:

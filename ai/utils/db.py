@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any
 
+import httpx
 import pymysql
 from pymysql.cursors import DictCursor
 
@@ -190,3 +191,20 @@ def get_snapshot(user_id: int) -> dict[str, Any]:
         "mucus_logs": get_mucus_logs(cycle_id) if cycle_id else [],
         "period_logs": get_period_logs(user_id),
     }
+
+
+def fetch_calendar_inputs_from_backend(user_id: int) -> dict[str, Any]:
+    """
+    Fetch cycle calendar inputs from Laravel backend.
+    Returns raw backend response with calendar input data.
+    """
+    url = f"{settings.BACKEND_URL}/cycle-calendar-inputs/{user_id}"
+    
+    try:
+        response = httpx.get(url, timeout=15.0)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as exc:
+        raise Exception(f"Backend API error: {exc.response.status_code} - {exc.response.text}")
+    except httpx.RequestError as exc:
+        raise Exception(f"Failed to connect to backend: {exc}")
