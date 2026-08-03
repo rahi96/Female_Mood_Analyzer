@@ -30,6 +30,19 @@ def fetch_health_trends_data(user_id: int, period: str = "7d") -> dict[str, Any]
     user_profile = _serialize(get_user_profile(user_id))
     health_logs = _serialize(get_health_logs(user_id))
 
+    # Return empty state if user has no health logs
+    if not health_logs or len(health_logs) == 0:
+        return {
+            "status": "empty",
+            "service": "health_trends",
+            "fetched": True,
+            "sources": {"database": "mysql"},
+            "message": "No health logs yet",
+            "description": "Start logging your daily health data to see personalized trends and insights.",
+            "user_profile": user_profile,
+            "health_logs": [],
+        }
+
     normalized_period = _normalize_period(period)
     health_trends = _select_period_response(_generate_health_trends_analysis(user_profile, health_logs), normalized_period)
 
