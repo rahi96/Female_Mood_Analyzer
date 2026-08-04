@@ -66,9 +66,20 @@ def _serialize(data: Any) -> Any:
 def _generate_health_trends_analysis(user_profile: Any, health_logs: Any) -> dict[str, Any]:
     prompt = _build_health_trends_prompt(user_profile, health_logs)
     response_text = _call_health_trends_llm(prompt)
+    
+    # DEBUG: Log LLM response
+    print(f"[HEALTH_TRENDS_DEBUG] LLM Response Length: {len(response_text) if response_text else 0}")
+    if response_text:
+        print(f"[HEALTH_TRENDS_DEBUG] LLM Response Preview: {response_text[:500]}...")
+    else:
+        print(f"[HEALTH_TRENDS_DEBUG] LLM returned empty response!")
+    
     parsed = _parse_health_trends_response(response_text)
     if parsed:
+        print(f"[HEALTH_TRENDS_DEBUG] Successfully parsed LLM response")
         return parsed
+    
+    print(f"[HEALTH_TRENDS_DEBUG] Failed to parse LLM response, using fallback static data")
     return _fallback_health_trends_analysis()
 
 def _normalize_period(period: str) -> str:
@@ -228,16 +239,22 @@ def _call_health_trends_llm(prompt: str) -> str:
 
     for attempt in range(attempts):
         try:
-            return llm_call(
+            print(f"[HEALTH_TRENDS_DEBUG] Calling LLM (attempt {attempt + 1}/{attempts})...")
+            result = llm_call(
                 prompt=prompt,
                 system=HEALTH_TRENDS_SYSTEM_PROMPT,
                 max_tokens=3200,
             )
+            print(f"[HEALTH_TRENDS_DEBUG] LLM call succeeded")
+            return result
         except Exception as exc:
+            print(f"[HEALTH_TRENDS_DEBUG] LLM call failed (attempt {attempt + 1}): {type(exc).__name__}: {str(exc)[:200]}")
             is_last_attempt = attempt == attempts - 1
             if not _is_retryable_llm_error(exc):
+                print(f"[HEALTH_TRENDS_DEBUG] Non-retryable error, raising exception")
                 raise
             if is_last_attempt:
+                print(f"[HEALTH_TRENDS_DEBUG] Final attempt failed, returning empty string")
                 return ""
             time.sleep(LLM_RETRY_DELAYS_SECONDS[attempt])
 
