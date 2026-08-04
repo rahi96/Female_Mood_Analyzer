@@ -6,8 +6,6 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    environment:
-      MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
     ports:
       - "8002:8000"
     volumes:
