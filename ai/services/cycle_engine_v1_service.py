@@ -542,11 +542,25 @@ def bbt_ui(user_id: int) -> dict[str, Any]:
 
 
 def bbt_ui_log(user_id: int, payload) -> dict[str, Any]:
-    """Log BBT reading, then return full BBT page UI."""
+    """Log BBT reading, then return full BBT page UI.
+    
+    - date: null → defaults to today
+    - time: null → defaults to current time
+    - temperature_f: required to log (if null, just returns UI without logging)
+    """
     from ai.models.cycle_engine_v1_models import BBTUILogRequest
     
     state = _user_state(user_id)
     log_date = payload.date or _today()
+    
+    # Validate time format if provided
+    log_time = payload.time
+    if log_time and log_time != "string":  # Swagger default placeholder
+        # Basic validation: should be HH:MM format
+        if not (len(log_time) >= 4 and ":" in log_time):
+            raise ValueError("Time must be in 'HH:MM' format (e.g., '06:30')")
+    if not log_time or log_time == "string":
+        log_time = _utc_now().strftime("%H:%M")
     
     # Log BBT if temperature provided
     if payload.temperature_f is not None:
@@ -555,7 +569,7 @@ def bbt_ui_log(user_id: int, payload) -> dict[str, Any]:
             "user_id": user_id,
             "date": log_date.isoformat(),
             "temperature_f": payload.temperature_f,
-            "logged_at_time": payload.time or _utc_now().strftime("%H:%M"),
+            "logged_at_time": log_time,
             "flags": list(payload.flags) if payload.flags else [],
         }
         # Replace existing log for same date

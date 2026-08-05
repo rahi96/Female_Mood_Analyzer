@@ -49,8 +49,15 @@ class OPKUILogRequest(BaseModel):
 
 
 class BBTUILogRequest(BaseModel):
-    """Request to log BBT reading, returns full UI."""
-    date: Optional[date] = None  # Defaults to today if not provided
-    temperature_f: Optional[float] = Field(default=None, ge=90, le=110)
-    time: Optional[str] = None
-    flags: Optional[list[BBTFlag]] = None
+    """Request to log BBT reading, returns full UI.
+    
+    All fields are optional:
+    - date: Defaults to today if null/omitted
+    - temperature_f: Required to actually log (90-110°F range)
+    - time: Defaults to current time if null/omitted (format: "HH:MM" like "06:30")
+    - flags: Optional BBT flags (illness, low_sleep, alcohol, restless_sleep)
+    """
+    date: Optional[date] = Field(None, description="Log date (defaults to today if null)")
+    temperature_f: Optional[float] = Field(None, ge=90, le=110, description="Temperature in Fahrenheit (90-110°F)")
+    time: Optional[str] = Field(None, description="Time of reading (format: 'HH:MM' like '06:30', defaults to now)")
+    flags: Optional[list[BBTFlag]] = Field(None, description="Temperature flags: illness, low_sleep, alcohol, restless_sleep")
