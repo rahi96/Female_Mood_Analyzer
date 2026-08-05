@@ -109,6 +109,9 @@ def current_user_id() -> int:
 # ---------------------------------------------------------------------------
 
 def engine_summary(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "engine_summary")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     reconciliation = _recompute_reconciliation(state)
@@ -149,6 +152,9 @@ def engine_summary(user_id: int) -> dict[str, Any]:
 
 
 def engine_signal_status(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "engine_signal_status")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     today = _today()
@@ -245,6 +251,9 @@ def calendar_confirm_day(user_id: int, payload: ConfirmDayRequest) -> dict[str, 
 
 
 def calendar_next_period(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "calendar_next_period")
+    
     state = _cycle_state(user_id)
     lengths = _last_cycle_lengths(state)
     rolling_avg = round(sum(lengths) / len(lengths), 1) if lengths else float(state["avg_cycle_length"])
@@ -348,6 +357,9 @@ def bbt_chart(user_id: int, cycle_day_range: str = "1-28") -> dict[str, Any]:
 
 
 def bbt_coverline_status(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "bbt_coverline_status")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     status = _coverline_status(state)
@@ -564,6 +576,9 @@ def bbt_ui_log(user_id: int, payload) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def opk_testing_window(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "opk_testing_window")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     reconciliation = _recompute_reconciliation(state)
@@ -638,6 +653,9 @@ def opk_log(user_id: int, payload: OPKLogRequest) -> dict[str, Any]:
 
 
 def opk_today_status(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "opk_today_status")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     today = _today()
@@ -894,6 +912,9 @@ def reconciliation_recompute(user_id: int) -> dict[str, Any]:
 
 
 def reconciliation_current(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "reconciliation_current")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     fallback = _recompute_reconciliation(state)
@@ -915,6 +936,9 @@ def reconciliation_current(user_id: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def ttc_surge_banner(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "ttc_surge_banner")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     reconciliation = _recompute_reconciliation(state)
@@ -954,6 +978,9 @@ def ttc_surge_banner(user_id: int) -> dict[str, Any]:
 
 
 def ttc_priority_map(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "ttc_priority_map")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     reconciliation = _recompute_reconciliation(state)
@@ -1007,6 +1034,9 @@ def ttc_priority_map(user_id: int) -> dict[str, Any]:
 
 
 def ttc_priority_banner(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "ttc_priority_banner")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     reconciliation = _recompute_reconciliation(state)
@@ -1049,6 +1079,9 @@ def ttc_priority_banner(user_id: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def awareness_current_phase(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "awareness_current_phase")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     phase = state["current_phase"]
@@ -1083,6 +1116,9 @@ def awareness_current_phase(user_id: int) -> dict[str, Any]:
 
 def awareness_hormone_levels(user_id: int) -> dict[str, Any]:
     """Modeled from phase — not measured lab hormone data."""
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "awareness_hormone_levels")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     levels = HORMONE_BY_PHASE[state["current_phase"]]
@@ -1107,6 +1143,9 @@ def awareness_hormone_levels(user_id: int) -> dict[str, Any]:
 
 
 def awareness_phase_education(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "awareness_phase_education")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     phase = state["current_phase"]
@@ -1139,6 +1178,9 @@ def awareness_phase_education(user_id: int) -> dict[str, Any]:
 
 
 def awareness_four_phase_wheel(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "awareness_four_phase_wheel")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     current = state["current_phase"]
