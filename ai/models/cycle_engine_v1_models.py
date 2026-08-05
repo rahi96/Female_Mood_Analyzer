@@ -48,6 +48,11 @@ class OPKUILogRequest(BaseModel):
     mucus_type: Optional[MucusType] = None
 
 
+class CalendarAllMonthRequest(BaseModel):
+    """Request to get calendar for a specific month."""
+    date: date
+
+
 class BBTUILogRequest(BaseModel):
     """Request to log BBT reading, returns full UI.
     

@@ -243,6 +243,21 @@ def calendar_month(user_id: int) -> dict[str, Any]:
     return fetch_calendar_inputs_from_backend(user_id)
 
 
+def calendar_all_month(user_id: int, payload) -> dict[str, Any]:
+    """
+    Fetch cycle calendar for a specific month based on provided date.
+    Returns calendar input data for the month containing the given date.
+    """
+    from ai.models.cycle_engine_v1_models import CalendarAllMonthRequest
+    
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "calendar_all_month")
+    
+    # TODO: Implement month-specific calendar logic based on payload.date
+    # For now, returns same as calendar_month
+    return fetch_calendar_inputs_from_backend(user_id)
+
+
 def calendar_confirm_day(user_id: int, payload: ConfirmDayRequest) -> dict[str, Any]:
     state = _user_state(user_id)
     state["confirmations"].append({"date": payload.date.isoformat(), "is_day_n": payload.is_day_n})
