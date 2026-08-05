@@ -25,8 +25,11 @@ from ai.models.cycle_engine_v1_models import (
     OPKLogRequest,
     OPKUILogRequest,
 )
-from ai.utils.db import fetch_calendar_inputs_from_backend, get_snapshot as get_db_snapshot
+from ai.utils.db import fetch_calendar_inputs_from_backend, get_snapshot as get_db_snapshot, user_exists
 from ai.utils.llm_call import llm_call
+
+# Feature flag: Set to True to validate user existence before processing
+VALIDATE_USER_EXISTS = False  # Set to True if Laravel wants user validation
 
 
 SPERM_VIABILITY_DAYS = 5
@@ -109,6 +112,14 @@ def current_user_id() -> int:
 # ---------------------------------------------------------------------------
 
 def engine_summary(user_id: int) -> dict[str, Any]:
+    if VALIDATE_USER_EXISTS and not user_exists(user_id):
+        return {
+            "status": "error",
+            "error_code": "USER_NOT_FOUND",
+            "message": f"User {user_id} does not exist in database",
+            "user_id": user_id,
+        }
+    
     if not _has_cycle_data(user_id):
         return _empty_state_response(user_id, "engine_summary")
     

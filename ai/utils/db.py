@@ -193,6 +193,14 @@ def get_snapshot(user_id: int) -> dict[str, Any]:
     }
 
 
+def user_exists(user_id: int) -> bool:
+    """Check if user exists in users table."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+        return cursor.fetchone() is not None
+
+
 def fetch_calendar_inputs_from_backend(user_id: int) -> dict[str, Any]:
     """
     Fetch cycle calendar inputs from Laravel backend.
