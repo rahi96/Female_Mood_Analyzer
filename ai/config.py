@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     BACKEND_URL: str = "https://api.fightthenumber.com/api/v1"
-    BACKEND_ACCESS_TOKEN: str = ""
+    BACKEND_ACCESS_TOKEN: str = "68|sy9b17zR1xYNrtFdEnw89VB0ttoXSfxGjP7bk4ODa6e08394"
     LAB_REPORTS_URL: str = "https://api.fightthenumber.com/api/v1/lab-reports"
     SKIN_SCANS_URL: str = "https://api.fightthenumber.com/api/v1/skin-scans"
     CYCLE_ENGINE_PROFILE_URL: str = "https://api.fightthenumber.com/api/v1/user-profile"
