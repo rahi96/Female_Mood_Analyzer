@@ -270,25 +270,19 @@ def calendar_next_period(user_id: int) -> dict[str, Any]:
     rolling_avg = round(sum(lengths) / len(lengths), 1) if lengths else float(state["avg_cycle_length"])
     variance = max(lengths) - min(lengths) if lengths else int(state["cycle_variance_days"])
     predicted = state["cycle_start_date"] + timedelta(days=round(rolling_avg))
-    fallback = {
+    
+    # Return raw database calculations (no AI generation needed)
+    return {
         "predicted_date": predicted.isoformat(),
         "days_until": max(0, (predicted - _today()).days),
         "rolling_avg_length": rolling_avg,
         "variance_days": variance,
         "within_normal_range": variance <= 7,
         "last_4_cycle_lengths": lengths[-4:],
+        "ai_generated": False,
+        "fetched": True,
+        "sources": state["sources"],
     }
-    return _ai_endpoint_response(
-        "calendar_next_period",
-        state,
-        (
-            "Return JSON with predicted_date (YYYY-MM-DD), days_until, rolling_avg_length, "
-            "variance_days, within_normal_range (bool), last_4_cycle_lengths (list of ints). "
-            "Derive from profile/snapshot cycle history when available."
-        ),
-        fallback,
-        max_tokens=700,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1339,7 +1333,20 @@ def _cycle_state(user_id: int) -> dict[str, Any]:
     # Skip rows without a period_start_date (e.g. calendar-only cycles that
     # haven't logged an actual period yet) so downstream date parsing never
     # sees a None value.
-    backend_periods = calendar_periods
+    backend_periods = []
+    for log in db_snapshot.get("period_logs") or []:
+        if not log.get("period_start_date"):
+            continue
+        backend_periods.append({
+            "id": log.get("id"),
+            "user_id": user_id,
+            "start_date": str(log.get("period_start_date"))[:10],
+            "end_date": str(log.get("period_end_date"))[:10] if log.get("period_end_date") else None,
+        })
+    
+    # Merge with calendar periods (fallback to calendar if MySQL is empty)
+    if not backend_periods:
+        backend_periods = calendar_periods
 
     period_logs = backend_periods
     bbt_logs = _merge_logs(backend_bbt, user["bbt_logs"], key="date")
