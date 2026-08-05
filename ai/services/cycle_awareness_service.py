@@ -29,6 +29,21 @@ Rules:
 def fetch_cycle_awareness_data(user_id: int) -> dict[str, Any]:
     user_profile = _serialize(get_user_profile(user_id))
     snapshot = _serialize(get_snapshot(user_id))
+    
+    # Check if user has any cycle data
+    has_data = _has_cycle_data(snapshot)
+    if not has_data:
+        return {
+            "status": "empty",
+            "service": "cycle_awareness",
+            "fetched": True,
+            "sources": {"database": "mysql"},
+            "user_id": user_id,
+            "message": "No cycle data yet",
+            "description": "Start logging your period data to see personalized cycle awareness insights.",
+            "user_profile": user_profile,
+        }
+    
     cycle_awareness = _generate_cycle_awareness_analysis(user_profile, snapshot)
 
     return {
@@ -40,6 +55,16 @@ def fetch_cycle_awareness_data(user_id: int) -> dict[str, Any]:
         "user_profile": user_profile,
         "snapshot": snapshot,
     }
+
+
+def _has_cycle_data(snapshot: Any) -> bool:
+    """Check if snapshot contains any real cycle data."""
+    if not snapshot:
+        return False
+    has_cycles = snapshot.get("current_cycle") or snapshot.get("period_logs")
+    has_bbt = snapshot.get("bbt_logs") and len(snapshot.get("bbt_logs", [])) > 0
+    has_opk = snapshot.get("opk_logs") and len(snapshot.get("opk_logs", [])) > 0
+    return bool(has_cycles or has_bbt or has_opk)
 
 
 def _serialize(data: Any) -> Any:

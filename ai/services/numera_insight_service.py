@@ -27,6 +27,19 @@ Rules:
 
 def fetch_numera_insight_data(user_id: int) -> dict[str, Any]:
     user_profile = _serialize(get_user_profile(user_id))
+    
+    # Check if user has profile data
+    if not user_profile or not user_profile.get("id"):
+        return {
+            "status": "empty",
+            "service": "numera_insight",
+            "fetched": True,
+            "sources": {"database": "mysql"},
+            "user_id": user_id,
+            "message": "No profile data yet",
+            "description": "Complete your profile to see personalized Numera insights.",
+        }
+    
     numera_insight = _generate_numera_insight(user_profile)
 
     return {

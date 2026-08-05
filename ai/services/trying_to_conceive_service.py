@@ -29,6 +29,20 @@ Rules:
 def fetch_trying_to_conceive_data(user_id: int) -> dict[str, Any]:
     user_profile = _serialize(get_user_profile(user_id))
     snapshot = _serialize(get_snapshot(user_id))
+    
+    # Check if user has any cycle data
+    if not snapshot or not (snapshot.get("current_cycle") or snapshot.get("bbt_logs") or snapshot.get("opk_logs")):
+        return {
+            "status": "empty",
+            "service": "trying_to_conceive",
+            "fetched": True,
+            "sources": {"database": "mysql"},
+            "user_id": user_id,
+            "message": "No cycle data yet",
+            "description": "Start logging your cycle data to see personalized conception insights.",
+            "user_profile": user_profile,
+        }
+    
     trying_to_conceive = _generate_trying_to_conceive_analysis(user_profile, snapshot)
 
     return {

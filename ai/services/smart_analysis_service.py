@@ -32,6 +32,23 @@ def fetch_smart_analysis_data(user_id: int) -> dict[str, Any]:
     cycle_snapshot = _serialize(get_snapshot(user_id))
     skin_scans = _serialize(get_skin_scans(user_id))
 
+    # Check if user has any data
+    has_health = health_logs and len(health_logs) > 0
+    has_cycle = cycle_snapshot and (cycle_snapshot.get("current_cycle") or cycle_snapshot.get("bbt_logs"))
+    has_scans = skin_scans and len(skin_scans) > 0
+    
+    if not (has_health or has_cycle or has_scans):
+        return {
+            "status": "empty",
+            "service": "smart_analysis",
+            "fetched": True,
+            "sources": {"database": "mysql"},
+            "user_id": user_id,
+            "message": "No data yet",
+            "description": "Start logging your health data, cycle data, or skin scans to see smart analysis.",
+            "user_profile": user_profile,
+        }
+
     smart_analysis = _generate_smart_analysis(
         user_profile=user_profile,
         health_logs=health_logs,

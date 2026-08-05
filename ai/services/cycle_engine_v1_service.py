@@ -221,6 +221,8 @@ def calendar_month(user_id: int) -> dict[str, Any]:
     Fetch cycle calendar inputs from backend.
     Returns raw backend response with calendar input data (start_date, end_date, etc).
     """
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "calendar_month")
     return fetch_calendar_inputs_from_backend(user_id)
 
 
@@ -371,6 +373,9 @@ def bbt_coverline_status(user_id: int) -> dict[str, Any]:
 
 def bbt_ui(user_id: int) -> dict[str, Any]:
     """Full BBT page UI - single AI-generated response."""
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "bbt_ui")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     
@@ -673,6 +678,9 @@ def opk_today_status(user_id: int) -> dict[str, Any]:
 
 def opk_ui(user_id: int) -> dict[str, Any]:
     """Full OPK/LH page UI - single AI-generated response."""
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "opk_ui")
+    
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     today = _today()
@@ -1404,6 +1412,33 @@ def _fetch_cycle_calendar_periods(user_id: int) -> tuple[list[dict[str, Any]], s
         periods.sort(key=lambda item: item["start_date"])
     
     return periods, source_url
+
+
+def _has_cycle_data(user_id: int) -> bool:
+    """Check if user has any real cycle data in database."""
+    calendar_periods, _ = _fetch_cycle_calendar_periods(user_id)
+    db_snapshot = get_db_snapshot(user_id)
+    
+    # Check for any actual logged data
+    has_periods = calendar_periods and len(calendar_periods) > 0
+    has_bbt = db_snapshot.get("bbt_logs") and len(db_snapshot.get("bbt_logs", [])) > 0
+    has_opk = db_snapshot.get("opk_logs") and len(db_snapshot.get("opk_logs", [])) > 0
+    has_mucus = db_snapshot.get("mucus_logs") and len(db_snapshot.get("mucus_logs", [])) > 0
+    
+    return has_periods or has_bbt or has_opk or has_mucus
+
+
+def _empty_state_response(user_id: int, endpoint: str) -> dict[str, Any]:
+    """Return empty state when user has no cycle data."""
+    return {
+        "status": "empty",
+        "service": f"cycle_engine_v1_{endpoint}",
+        "fetched": True,
+        "sources": {"database": "mysql"},
+        "user_id": user_id,
+        "message": "No cycle data yet",
+        "description": "Start logging your period, BBT, or OPK data to see personalized cycle insights.",
+    }
 
 
 def _cycle_summary(state: dict[str, Any]) -> dict[str, Any]:
