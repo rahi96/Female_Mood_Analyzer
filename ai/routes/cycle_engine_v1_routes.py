@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ai.models.cycle_engine_v1_models import (
     BBTUILogRequest,
-    CalendarAllMonthRequest,
+    CalendarMonthRequest,
     ConsentRequest,
     ModeRequest,
     OPKUILogRequest,
@@ -43,19 +43,14 @@ async def engine_discrepancy_note(user_id: int = Query(..., description="User ID
     return _run(service.engine_discrepancy_note, user_id)
 
 
-@router.get("/calendar/month")
-async def calendar_month(user_id: int = Query(..., ge=1, description="User ID")):
-    return _run(service.calendar_month, user_id)
+@router.post("/calendar/month")
+async def calendar_month(payload: CalendarMonthRequest, user_id: int = Query(..., description="User ID")):
+    return _run(service.calendar_month, user_id, payload)
 
 
 @router.get("/calendar/next-period")
 async def calendar_next_period(user_id: int = Query(..., description="User ID")):
     return _run(service.calendar_next_period, user_id)
-
-
-@router.post("/calendar/all_month")
-async def calendar_all_month(payload: CalendarAllMonthRequest, user_id: int = Query(..., description="User ID")):
-    return _run(service.calendar_all_month, user_id, payload)
 
 
 @router.get("/bbt/ui")

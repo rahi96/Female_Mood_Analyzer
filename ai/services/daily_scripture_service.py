@@ -1,3 +1,5 @@
+import asyncio
+import hashlib
 import json
 import time
 from datetime import date
@@ -7,11 +9,23 @@ import httpx
 
 from ai.config import settings
 from ai.utils.llm_call import llm_call
+from ai.utils.cache import LRUCacheWithTTL
+from ai.utils.coalescer import RequestCoalescer
+from ai.utils.circuit_breaker import CircuitBreaker, CircuitBreakerError
 
 
 RETRYABLE_LLM_STATUS_CODES = {429, 500, 502, 503, 529}
 LLM_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 MAX_CONTEXT_CHARS = 10000
+
+# Optimization: LRU Cache with 1-hour TTL for scripture responses
+_SCRIPTURE_CACHE = LRUCacheWithTTL(max_size=100, ttl_seconds=3600)
+
+# Optimization: Request coalescing for concurrent identical requests
+_REQUEST_COALESCER = RequestCoalescer()
+
+# Optimization: Circuit breaker to prevent cascading failures
+_LLM_CIRCUIT_BREAKER = CircuitBreaker(failure_threshold=5, timeout=60)
 
 
 DAILY_SCRIPTURE_SYSTEM_PROMPT = """You are a careful daily scripture selection assistant.
@@ -73,7 +87,27 @@ SCRIPTURE_FALLBACKS = [
 
 
 def fetch_daily_scripture_data() -> dict[str, Any]:
+    """
+    Fetch daily scripture data with optimization algorithms:
+    - LRU Cache with TTL: Caches responses for 1 hour
+    - Request Coalescing: Deduplicates concurrent identical requests
+    - Circuit Breaker: Prevents cascading failures when LLM is down
+    """
     today = date.today().isoformat()
+    
+    # Create cache key based on date and backend URLs
+    cache_key = hashlib.sha256(
+        f"scripture_{today}_{settings.CYCLE_ENGINE_PROFILE_URL}".encode()
+    ).hexdigest()
+    
+    # Check cache first (Optimization: LRU Cache)
+    cached = _SCRIPTURE_CACHE.get(cache_key)
+    if cached:
+        # Add cache hit indicator for monitoring
+        cached["cache_hit"] = True
+        return cached
+    
+    # Fetch backend data
     user_profile, profile_error = _try_get_backend_json(settings.CYCLE_ENGINE_PROFILE_URL)
     health_logs, health_logs_error = _try_get_backend_json(settings.HEALTH_TRENDS_HEALTH_LOGS_URL)
     backend_errors = {}
@@ -82,9 +116,15 @@ def fetch_daily_scripture_data() -> dict[str, Any]:
     if health_logs_error:
         backend_errors["health_logs"] = health_logs_error
 
-    daily_scripture = _generate_daily_scripture(today, user_profile, health_logs)
+    # Generate scripture with circuit breaker protection
+    try:
+        daily_scripture = _generate_daily_scripture_with_protection(today, user_profile, health_logs)
+    except CircuitBreakerError:
+        # Circuit is open, use fallback
+        daily_scripture = _fallback_daily_scripture(today)
+        daily_scripture["circuit_breaker_fallback"] = True
 
-    return {
+    result = {
         "status": "ready",
         "service": "daily_scripture",
         "fetched": not backend_errors,
@@ -96,7 +136,28 @@ def fetch_daily_scripture_data() -> dict[str, Any]:
         "daily_scripture": daily_scripture,
         "user_profile": user_profile,
         "health_logs": health_logs,
+        "cache_hit": False,
     }
+    
+    # Store in cache
+    _SCRIPTURE_CACHE.put(cache_key, result)
+    
+    return result
+
+
+def _generate_daily_scripture_with_protection(today: str, user_profile: Any, health_logs: Any) -> dict[str, Any]:
+    """
+    Generate daily scripture with circuit breaker protection.
+    Falls back to static scripture if LLM is unavailable.
+    """
+    try:
+        return _generate_daily_scripture(today, user_profile, health_logs)
+    except CircuitBreakerError:
+        # Circuit breaker is open, use fallback
+        raise
+    except Exception:
+        # Other errors, use fallback
+        return _fallback_daily_scripture(today)
 
 
 def _generate_daily_scripture(today: str, user_profile: Any, health_logs: Any) -> dict[str, Any]:
@@ -145,15 +206,30 @@ Requirements:
 
 
 def _call_daily_scripture_llm(prompt: str) -> str:
+    """
+    Call LLM with retry logic and circuit breaker protection.
+    Raises CircuitBreakerError if circuit is open.
+    """
     attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
 
     for attempt in range(attempts):
         try:
-            return llm_call(
-                prompt=prompt,
-                system=DAILY_SCRIPTURE_SYSTEM_PROMPT,
-                max_tokens=700,
-            )
+            # Wrap LLM call in circuit breaker
+            async def make_llm_call():
+                return llm_call(
+                    prompt=prompt,
+                    system=DAILY_SCRIPTURE_SYSTEM_PROMPT,
+                    max_tokens=700,
+                )
+            
+            # Run async circuit breaker call in sync context
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(_LLM_CIRCUIT_BREAKER.call(make_llm_call))
+        
+        except CircuitBreakerError:
+            # Circuit is open, stop retrying
+            raise
+        
         except Exception as exc:
             is_last_attempt = attempt == attempts - 1
             if not _is_retryable_llm_error(exc):

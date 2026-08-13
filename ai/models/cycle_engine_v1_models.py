@@ -48,8 +48,8 @@ class OPKUILogRequest(BaseModel):
     mucus_type: Optional[MucusType] = None
 
 
-class CalendarAllMonthRequest(BaseModel):
-    """Request to get calendar for a specific month."""
+class CalendarMonthRequest(BaseModel):
+    """Request to get calendar info for a specific date."""
     date: date
 
 

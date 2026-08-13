@@ -233,29 +233,44 @@ def engine_discrepancy_note(user_id: int) -> dict[str, Any]:
 # Calendar (§3)
 # ---------------------------------------------------------------------------
 
-def calendar_month(user_id: int) -> dict[str, Any]:
+def calendar_month(user_id: int, payload) -> dict[str, Any]:
     """
-    Fetch cycle calendar inputs from backend.
-    Returns raw backend response with calendar input data (start_date, end_date, etc).
+    Get calendar info for a specific date.
+    Returns phase and status for the selected date only.
     """
+    from ai.models.cycle_engine_v1_models import CalendarMonthRequest
+    
     if not _has_cycle_data(user_id):
         return _empty_state_response(user_id, "calendar_month")
-    return fetch_calendar_inputs_from_backend(user_id)
-
-
-def calendar_all_month(user_id: int, payload) -> dict[str, Any]:
-    """
-    Fetch cycle calendar for a specific month based on provided date.
-    Returns calendar input data for the month containing the given date.
-    """
-    from ai.models.cycle_engine_v1_models import CalendarAllMonthRequest
     
-    if not _has_cycle_data(user_id):
-        return _empty_state_response(user_id, "calendar_all_month")
+    # Fetch from MySQL
+    db_snapshot = get_db_snapshot(user_id)
+    current_cycle = db_snapshot.get("current_cycle")
     
-    # TODO: Implement month-specific calendar logic based on payload.date
-    # For now, returns same as calendar_month
-    return fetch_calendar_inputs_from_backend(user_id)
+    if not current_cycle or not current_cycle.get("period_start_date"):
+        return {"error": "No active cycle found"}
+    
+    # Get data
+    period_start = _parse_date(current_cycle["period_start_date"])
+    selected_date = payload.date
+    cycle_day = (selected_date - period_start).days + 1
+    
+    # Get profile data
+    profile = db_snapshot.get("profile") or {}
+    avg_length = profile.get("avg_cycle_length") or 28
+    bbt_logs = db_snapshot.get("bbt_logs") or []
+    
+    # Calculate phase
+    phase = _get_phase_info(cycle_day, avg_length, bbt_logs)
+    calendar_status = _get_calendar_status(cycle_day, phase["name"])
+    
+    # Return ONLY selected date info
+    return {
+        "selected_date": selected_date.isoformat(),
+        "cycle_day": cycle_day,
+        "phase": phase,
+        "calendar_status": calendar_status
+    }
 
 
 def calendar_confirm_day(user_id: int, payload: ConfirmDayRequest) -> dict[str, Any]:
@@ -2276,6 +2291,67 @@ def _today() -> date:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _get_phase_info(cycle_day: int, avg_cycle_length: int, bbt_logs: list) -> dict[str, Any]:
+    """Determine phase and color for a specific cycle day."""
+    # Period: Days 1-5 (Red)
+    if 1 <= cycle_day <= 5:
+        return {
+            "name": "Menstrual Phase",
+            "color": "red",
+            "icon": "🔴"
+        }
+    
+    # Estimate ovulation day (typically 14 days before next period)
+    ovulation_day = avg_cycle_length - 14
+    
+    # Fertile Window: 5 days before ovulation + ovulation day (Light Pink)
+    fertile_start = ovulation_day - 5
+    fertile_end = ovulation_day + 1
+    if fertile_start <= cycle_day <= fertile_end:
+        return {
+            "name": "Fertile Window",
+            "color": "light_pink",
+            "icon": "🌸"
+        }
+    
+    # Check BBT confirmation for ovulation (Orange)
+    # Look for sustained temperature rise pattern
+    if bbt_logs and cycle_day >= 14:
+        # Simplified: Check if this is near confirmed ovulation day
+        # TODO: Implement proper BBT coverline confirmation logic
+        if cycle_day == ovulation_day:
+            return {
+                "name": "Confirmed Ovulation (BBT)",
+                "color": "orange",
+                "icon": "🟠"
+            }
+    
+    # Luteal Phase: After ovulation (Beige)
+    if cycle_day > ovulation_day:
+        return {
+            "name": "Luteal Phase",
+            "color": "beige",
+            "icon": "🟨"
+        }
+    
+    # Follicular Phase: Days 6 to ovulation (White)
+    return {
+        "name": "Follicular Phase",
+        "color": "white",
+        "icon": "⚪"
+    }
+
+
+def _get_calendar_status(cycle_day: int, phase_name: str) -> dict[str, bool]:
+    """Build calendar status flags for a specific day."""
+    return {
+        "is_period": cycle_day <= 5,
+        "is_fertile_window": "Fertile" in phase_name,
+        "is_luteal": "Luteal" in phase_name,
+        "is_confirmed_ovulation": "Confirmed" in phase_name
+    }
 
 
 def _is_retryable_llm_error(exc: Exception) -> bool:
