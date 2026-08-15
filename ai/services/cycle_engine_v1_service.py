@@ -264,8 +264,30 @@ def calendar_month(user_id: int, payload) -> dict[str, Any]:
     phase = _get_phase_info(cycle_day, avg_length, bbt_logs)
     calendar_status = _get_calendar_status(cycle_day, phase["name"])
     
-    # Return ONLY selected date info
+    # Calculate phase date range
+    ovulation_day = avg_length - 14
+    phase_name = phase["name"]
+    
+    if "Menstrual" in phase_name:
+        start_date = period_start
+        end_date = period_start + timedelta(days=4)
+    elif "Fertile" in phase_name:
+        start_date = period_start + timedelta(days=ovulation_day - 6)
+        end_date = period_start + timedelta(days=ovulation_day)
+    elif "Confirmed Ovulation" in phase_name:
+        start_date = period_start + timedelta(days=ovulation_day - 1)
+        end_date = period_start + timedelta(days=ovulation_day - 1)
+    elif "Luteal" in phase_name:
+        start_date = period_start + timedelta(days=ovulation_day)
+        end_date = period_start + timedelta(days=avg_length - 1)
+    else:  # Follicular Phase
+        start_date = period_start + timedelta(days=5)
+        end_date = period_start + timedelta(days=ovulation_day - 2)
+    
+    # Return selected date info with phase dates at top level
     return {
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
         "selected_date": selected_date.isoformat(),
         "cycle_day": cycle_day,
         "phase": phase,
