@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, HTTPException, Query
 
 from ai.models.cycle_engine_v1_models import (
@@ -43,8 +45,16 @@ async def engine_discrepancy_note(user_id: int = Query(..., description="User ID
     return _run(service.engine_discrepancy_note, user_id)
 
 
+@router.get("/calendar/month")
+async def calendar_month_get(user_id: int = Query(..., description="User ID")):
+    """Get calendar info for today's date."""
+    payload = CalendarMonthRequest(date=date.today())
+    return _run(service.calendar_month, user_id, payload)
+
+
 @router.post("/calendar/month")
-async def calendar_month(payload: CalendarMonthRequest, user_id: int = Query(..., description="User ID")):
+async def calendar_month_post(payload: CalendarMonthRequest, user_id: int = Query(..., description="User ID")):
+    """Get calendar info for a specific date."""
     return _run(service.calendar_month, user_id, payload)
 
 
