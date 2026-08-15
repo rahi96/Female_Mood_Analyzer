@@ -260,34 +260,30 @@ def calendar_month(user_id: int, payload) -> dict[str, Any]:
     avg_length = profile.get("avg_cycle_length") or 28
     bbt_logs = db_snapshot.get("bbt_logs") or []
     
+    # Handle invalid cycle days (before cycle start or too far)
+    if cycle_day <= 0:
+        cycle_day = 1  # Default to day 1 if date is before period start
+    elif cycle_day > avg_length + 7:
+        # Date is likely from next cycle, calculate relative to expected start
+        cycle_day = cycle_day % avg_length if cycle_day % avg_length != 0 else avg_length
+    
     # Calculate phase
     phase = _get_phase_info(cycle_day, avg_length, bbt_logs)
     calendar_status = _get_calendar_status(cycle_day, phase["name"])
     
-    # Calculate phase date range
-    ovulation_day = avg_length - 14
-    phase_name = phase["name"]
+    # Get user-selected start_date and end_date from database
+    # These are null if user hasn't selected dates yet
+    user_start_date = current_cycle.get("start_date")
+    user_end_date = current_cycle.get("end_date")
     
-    if "Menstrual" in phase_name:
-        start_date = period_start
-        end_date = period_start + timedelta(days=4)
-    elif "Fertile" in phase_name:
-        start_date = period_start + timedelta(days=ovulation_day - 6)
-        end_date = period_start + timedelta(days=ovulation_day)
-    elif "Confirmed Ovulation" in phase_name:
-        start_date = period_start + timedelta(days=ovulation_day - 1)
-        end_date = period_start + timedelta(days=ovulation_day - 1)
-    elif "Luteal" in phase_name:
-        start_date = period_start + timedelta(days=ovulation_day)
-        end_date = period_start + timedelta(days=avg_length - 1)
-    else:  # Follicular Phase
-        start_date = period_start + timedelta(days=5)
-        end_date = period_start + timedelta(days=ovulation_day - 2)
+    # Convert to ISO format if they exist, otherwise null
+    start_date_iso = _parse_date(user_start_date).isoformat() if user_start_date else None
+    end_date_iso = _parse_date(user_end_date).isoformat() if user_end_date else None
     
-    # Return selected date info with phase dates at top level
+    # Return selected date info with user-selected dates
     return {
-        "start_date": start_date.isoformat(),
-        "end_date": end_date.isoformat(),
+        "start_date": start_date_iso,
+        "end_date": end_date_iso,
         "selected_date": selected_date.isoformat(),
         "cycle_day": cycle_day,
         "phase": phase,
