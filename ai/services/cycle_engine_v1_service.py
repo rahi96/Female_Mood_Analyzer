@@ -271,16 +271,32 @@ def calendar_month(user_id: int, payload) -> dict[str, Any]:
     phase = _get_phase_info(cycle_day, avg_length, bbt_logs)
     calendar_status = _get_calendar_status(cycle_day, phase["name"])
     
-    # Get user-selected start_date and end_date from database
-    # Both come from backend DB (user selections), null if not selected
-    user_start_date = current_cycle.get("start_date")
-    user_end_date = current_cycle.get("end_date")
+    # Fetch calendar inputs from backend (separate table with user date selections)
+    try:
+        calendar_response = fetch_calendar_inputs_from_backend(user_id)
+        calendar_inputs = calendar_response.get("data", [])
+    except Exception as e:
+        print(f"[DEBUG] Failed to fetch calendar inputs: {e}")
+        calendar_inputs = []
+    
+    # Find calendar input for the selected date
+    user_start_date = None
+    user_end_date = None
+    
+    for input_record in calendar_inputs:
+        record_start = input_record.get("start_date")
+        if record_start:
+            # Check if this record's start_date matches the selected date
+            if _parse_date(record_start) == selected_date:
+                user_start_date = record_start
+                user_end_date = input_record.get("end_date")
+                break
     
     # Convert to ISO format if they exist, otherwise null
     start_date_iso = _parse_date(user_start_date).isoformat() if user_start_date else None
     end_date_iso = _parse_date(user_end_date).isoformat() if user_end_date else None
     
-    # If start_date is not selected, return empty state
+    # If start_date is not selected for this date, return empty state
     # Cycle day and phase cannot be calculated without a start date
     if not start_date_iso:
         return {
