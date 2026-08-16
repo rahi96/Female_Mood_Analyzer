@@ -272,7 +272,7 @@ def calendar_month(user_id: int, payload) -> dict[str, Any]:
     calendar_status = _get_calendar_status(cycle_day, phase["name"])
     
     # Get user-selected start_date and end_date from database
-    # These are null if user hasn't selected dates yet
+    # Both come from backend DB (user selections), null if not selected
     user_start_date = current_cycle.get("start_date")
     user_end_date = current_cycle.get("end_date")
     
@@ -280,11 +280,10 @@ def calendar_month(user_id: int, payload) -> dict[str, Any]:
     start_date_iso = _parse_date(user_start_date).isoformat() if user_start_date else None
     end_date_iso = _parse_date(user_end_date).isoformat() if user_end_date else None
     
-    # Return selected date info with user-selected dates
+    # Return calendar info with user-selected dates
     return {
         "start_date": start_date_iso,
         "end_date": end_date_iso,
-        "selected_date": selected_date.isoformat(),
         "cycle_day": cycle_day,
         "phase": phase,
         "calendar_status": calendar_status
