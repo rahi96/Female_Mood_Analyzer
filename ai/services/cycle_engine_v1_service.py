@@ -280,7 +280,19 @@ def calendar_month(user_id: int, payload) -> dict[str, Any]:
     start_date_iso = _parse_date(user_start_date).isoformat() if user_start_date else None
     end_date_iso = _parse_date(user_end_date).isoformat() if user_end_date else None
     
-    # Return calendar info with user-selected dates
+    # If start_date is not selected, return empty state
+    # Cycle day and phase cannot be calculated without a start date
+    if not start_date_iso:
+        return {
+            "start_date": None,
+            "end_date": None,
+            "cycle_day": None,
+            "phase": None,
+            "calendar_status": None,
+            "message": "No start date selected. Please select your period start date to see cycle information."
+        }
+    
+    # Return calendar info with user-selected dates and calculated phase
     return {
         "start_date": start_date_iso,
         "end_date": end_date_iso,
