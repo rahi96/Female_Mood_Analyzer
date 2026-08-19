@@ -20,6 +20,19 @@ class SkinScanMetrics(BaseModel):
     neumera_insight: str
 
 
+class SkinRecommendation(BaseModel):
+    icon: str
+    text: str
+    priority: str  # "high", "medium", "low"
+    category: str  # "hydration", "sleep", "skincare", "nutrition"
+
+
+class TodaysRecommendations(BaseModel):
+    recommendations: list[SkinRecommendation]
+    generated_at: str
+    analysis_summary: str
+
+
 class SkinScanResponse(SkinScanMetrics):
     id: Optional[int] = None
     user_id: Optional[int] = None

@@ -164,10 +164,15 @@ async def skin_scan_live_websocket(websocket: WebSocket):
         )
 
         try:
+            # Fetch user context once
             context, _ = await run_in_threadpool(fetch_skin_scan_context)
-            metrics = await run_in_threadpool(
-                analyze_live_skin_scan_session, session_frames, context
+            
+            # OPTIMIZED: Single AI call for both metrics AND recommendations
+            metrics, recommendations = await run_in_threadpool(
+                analyze_live_skin_scan_session_with_recommendations, session_frames, context
             )
+            
+            # Persist scan results to backend
             scan_response = await run_in_threadpool(
                 persist_skin_scan, session_frames, metrics, context
             )
@@ -201,6 +206,7 @@ async def skin_scan_live_websocket(websocket: WebSocket):
                 "updated_at": scan_response.updated_at,
                 "metrics": metrics.model_dump(),
                 "scan": scan_response.model_dump(),
+                "todays_recommendations": recommendations.model_dump(),
             },
         )
 

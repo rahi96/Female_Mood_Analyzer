@@ -8,7 +8,12 @@ from urllib.parse import urlparse
 import httpx
 
 from ai.config import settings
-from ai.models.skin_scan_models import SkinScanMetrics, SkinScanResponse
+from ai.models.skin_scan_models import (
+    SkinRecommendation,
+    SkinScanMetrics,
+    SkinScanResponse,
+    TodaysRecommendations,
+)
 from ai.utils.claude_llm import ClaudeLLM
 from ai.utils.llm_response_parser import LLMResponseParser
 
@@ -19,16 +24,33 @@ IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 MAX_CONTEXT_CHARS = 6000
 
 
-SKIN_SCAN_SYSTEM_PROMPT = """You are a careful cosmetic skin image analysis assistant for a wellness app.
+SKIN_SCAN_SYSTEM_PROMPT = """You are an expert cosmetic skin image analysis assistant for a wellness app.
 
-Rules:
-- Analyze only visible, non-identifying skin appearance in the provided image.
-- Do not diagnose medical conditions, identify a person, or make clinical claims.
-- Estimate cosmetic/wellness scores from 0 to 100.
-- Use short statuses such as Low, Fair, Good, High, or Needs attention.
-- Do not invent wearable, sleep, water-intake, cycle, or health-log context unless it is explicitly included in the prompt.
-- Return valid JSON only. Do not add markdown, code fences, or extra commentary.
-"""
+CRITICAL RULES:
+- ACTUALLY ANALYZE the provided skin images - look at texture, tone, hydration, pores, redness, elasticity
+- Each user's skin is UNIQUE - never return generic or similar scores for different users
+- Base ALL scores on VISIBLE skin characteristics in the images
+- Do NOT diagnose medical conditions or make clinical claims
+- Return ONLY valid JSON - no markdown, code fences, or commentary
+
+ANALYSIS REQUIREMENTS:
+- Study skin texture: smooth vs rough, fine lines, wrinkles
+- Assess hydration: dry patches, flaking, plumpness
+- Check redness: inflammation, irritation, even tone
+- Examine pores: visibility, size, congestion
+- Evaluate glow: radiance, dullness, vitality
+- Consider elasticity: firmness, sagging
+
+SCORES (0-100):
+- 0-40: Poor/Needs attention
+- 41-60: Fair/Below average  
+- 61-75: Good/Average
+- 76-90: Very good/Above average
+- 91-100: Excellent/Optimal
+
+STATUS MAPPING:
+- For hydration/texture/glow/pore_health/elasticity: Low (0-40), Fair (41-60), Good (61-75), High (76-100)
+- For redness: Low (0-30 = good), Moderate (31-60), High (61-100 = needs attention)"""
 
 
 def analyze_skin_scan() -> SkinScanResponse:
@@ -65,12 +87,91 @@ def analyze_live_skin_scan_session(
         raise ValueError("At least one skin scan frame is required before finalize")
 
     selected = _select_session_frames(frames, max_frames=max_frames)
-    prompt = _build_skin_scan_session_prompt(len(frames), len(selected), context)
+    user_id = extract_skin_scan_user_id(context)
+    
+    # OPTIMIZED: Single AI call for both metrics AND recommendations
+    prompt = _build_skin_scan_session_prompt(len(frames), len(selected), context, user_id)
     response_text = _call_skin_scan_session_llm(selected, prompt)
+    
+    # Parse metrics - NO FALLBACK, must succeed or raise error
     parsed = _parse_skin_metrics(response_text)
-    if parsed:
-        return parsed
-    return _fallback_skin_metrics()
+    if not parsed:
+        print(f"[ERROR] AI analysis failed for user {user_id}. Raw response: {response_text[:500]}")
+        raise ValueError(
+            "Skin scan analysis failed. Please ensure good lighting and retake the scan. "
+            "If the issue persists, contact support."
+        )
+    
+    return parsed
+
+
+def generate_skin_recommendations(
+    metrics: SkinScanMetrics,
+    context: dict[str, Any] | None = None,
+) -> TodaysRecommendations:
+    """Generate personalized recommendations based on actual skin analysis.
+    
+    OPTIMIZED: This is called separately only if needed. 
+    Prefer using the combined analysis in analyze_live_skin_scan_session_with_recommendations().
+    """
+    user_id = extract_skin_scan_user_id(context)
+    prompt = _build_recommendations_prompt(metrics, context, user_id)
+    
+    attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
+    messages = [{"role": "user", "content": prompt}]
+    
+    for attempt in range(attempts):
+        try:
+            response = ClaudeLLM().chat(
+                messages=messages,
+                system="You are a wellness assistant generating personalized skincare recommendations. Return ONLY valid JSON.",
+                max_tokens=800,
+            )
+            response_text = LLMResponseParser.extract_text(response)
+            parsed = _parse_recommendations(response_text)
+            if parsed:
+                return parsed
+        except Exception as exc:
+            is_last_attempt = attempt == attempts - 1
+            if not _is_retryable_llm_error(exc):
+                break
+            if is_last_attempt:
+                break
+            time.sleep(LLM_RETRY_DELAYS_SECONDS[attempt])
+    
+    # If AI fails, return minimal recommendations based on scores
+    print(f"[WARNING] Recommendations generation failed for user {user_id}, using score-based fallback")
+    return _generate_basic_recommendations(metrics)
+
+
+def analyze_live_skin_scan_session_with_recommendations(
+    frames: list[dict[str, Any]],
+    context: dict[str, Any] | None = None,
+    max_frames: int = 10,
+) -> tuple[SkinScanMetrics, TodaysRecommendations]:
+    """OPTIMIZED: Single AI call for both metrics and recommendations.
+    
+    This is the preferred method as it makes ONE AI call instead of two.
+    """
+    if not frames:
+        raise ValueError("At least one skin scan frame is required before finalize")
+
+    selected = _select_session_frames(frames, max_frames=max_frames)
+    user_id = extract_skin_scan_user_id(context)
+    
+    # Single optimized prompt for both analysis and recommendations
+    prompt = _build_combined_analysis_prompt(len(frames), len(selected), context, user_id)
+    response_text = _call_skin_scan_session_llm(selected, prompt)
+    
+    # Parse combined response
+    parsed_data = _parse_combined_response(response_text, user_id)
+    if not parsed_data:
+        raise ValueError(
+            "Skin scan analysis failed. Please ensure good lighting and retake the scan. "
+            "If the issue persists, contact support."
+        )
+    
+    return parsed_data["metrics"], parsed_data["recommendations"]
 
 
 def persist_skin_scan(
@@ -161,6 +262,23 @@ def _extract_saved_skin_scan_record(payload: Any) -> dict[str, Any] | None:
     return None
 
 
+def _generate_skin_metrics(
+    image_bytes: bytes,
+    content_type: str,
+    context: dict[str, Any] | None = None,
+) -> SkinScanMetrics:
+    user_id = extract_skin_scan_user_id(context)
+    prompt = _build_skin_scan_prompt(context, user_id)
+    response_text = _call_skin_scan_llm(image_bytes, _image_media_type(content_type), prompt)
+    parsed = _parse_skin_metrics(response_text)
+    if not parsed:
+        print(f"[ERROR] AI analysis failed for user {user_id}. Raw response: {response_text[:500]}")
+        raise ValueError(
+            "Skin scan analysis failed. Please ensure good lighting and retake the scan."
+        )
+    return parsed
+
+
 def fetch_skin_scan_context() -> tuple[dict[str, Any], dict[str, str]]:
     sources = {
         "user_profile": settings.CYCLE_ENGINE_PROFILE_URL,
@@ -235,22 +353,12 @@ def fetch_backend_skin_scan() -> tuple[dict[str, Any], bytes, str]:
     return record, image_response.content, image_content_type
 
 
-def _generate_skin_metrics(
-    image_bytes: bytes,
-    content_type: str,
-    context: dict[str, Any] | None = None,
-) -> SkinScanMetrics:
-    prompt = _build_skin_scan_prompt(context)
-    response_text = _call_skin_scan_llm(image_bytes, _image_media_type(content_type), prompt)
-    parsed = _parse_skin_metrics(response_text)
-    if parsed:
-        return parsed
-    return _fallback_skin_metrics()
-
-
-def _build_skin_scan_prompt(context: dict[str, Any] | None = None) -> str:
+def _build_skin_scan_prompt(context: dict[str, Any] | None = None, user_id: int | None = None) -> str:
     context_json = _skin_scan_context_json(context)
-    base_prompt = """Analyze this skin scan image and generate this exact JSON shape:
+    user_context = f" for user_id={user_id}" if user_id else ""
+    base_prompt = f"""CRITICAL: Actually analyze THIS specific user's skin{user_context}. Do NOT return generic scores.
+
+Analyze this skin scan image and generate this exact JSON shape:
 {
   "overall_score": 80,
   "hydration_score": 72,
@@ -286,12 +394,18 @@ def _build_skin_scan_session_prompt(
     total_frames: int,
     selected_frames: int,
     context: dict[str, Any] | None = None,
+    user_id: int | None = None,
 ) -> str:
     context_json = _skin_scan_context_json(context)
-    return f"""Analyze ALL of these live skin-scan frames together as one session.
+    user_context = f" for user_id={user_id}" if user_id else ""
+    return f"""CRITICAL: Actually analyze THIS specific user's skin{user_context}. Each person has UNIQUE skin - DO NOT return generic scores.
 
-You received {selected_frames} frame image(s) from a session that captured {total_frames} frame(s) total.
-Produce one overall cosmetic/wellness assessment across the full set — not a separate score per frame.
+INSTRUCTIONS:
+- You received {selected_frames} frame(s) from a session that captured {total_frames} frame(s) total
+- CAREFULLY EXAMINE each image - look at texture, hydration, pores, redness, tone
+- Compare patterns across frames to get accurate assessment
+- Scores must reflect ACTUAL visible skin characteristics
+- Each user gets DIFFERENT scores based on THEIR skin
 
 Generate this exact JSON shape:
 {{
@@ -312,14 +426,79 @@ Generate this exact JSON shape:
 }}
 
 Requirements:
-- Return only the analysis fields above. Do not include id, user_id, image_path, created_at, or updated_at.
-- All score fields must be integers from 0 to 100.
-- Prefer patterns that appear across multiple frames; discount one-off lighting/angle artifacts.
-- Make neumera_insight concise, practical, and non-medical.
-- Use backend wellness context only when present in the JSON below.
-- Do not invent wearable, sleep, water-intake, cycle, or lifestyle correlations unless those data are explicitly provided.
+- Base scores on VISIBLE skin features in the images
+- neumera_insight must describe what you ACTUALLY SEE in these images
+- Mention specific observations (e.g., "visible fine lines", "even tone", "enlarged pores")
+- Keep insight concise (2-3 sentences), practical, non-medical
 
-Backend wellness context JSON:
+User wellness context:
+{context_json}
+"""
+
+
+def _build_combined_analysis_prompt(
+    total_frames: int,
+    selected_frames: int,
+    context: dict[str, Any] | None = None,
+    user_id: int | None = None,
+) -> str:
+    """OPTIMIZED: Single prompt for both metrics AND recommendations."""
+    context_json = _skin_scan_context_json(context)
+    user_context = f" for user_id={user_id}" if user_id else ""
+    return f"""CRITICAL: Actually analyze THIS specific user's skin{user_context}. Each person has UNIQUE skin.
+
+TASK: Analyze {selected_frames} frame(s) from {total_frames} total and provide:
+1. Detailed skin metrics based on what you ACTUALLY SEE
+2. Personalized recommendations based on the analysis
+
+Generate this EXACT JSON structure:
+{{
+  "metrics": {{
+    "overall_score": 75,
+    "hydration_score": 68,
+    "redness_score": 25,
+    "texture_score": 72,
+    "glow_index": 65,
+    "pore_health_score": 70,
+    "elasticity_score": 73,
+    "hydration_status": "Fair",
+    "redness_status": "Low",
+    "texture_status": "Good",
+    "glow_status": "Fair",
+    "pore_health_status": "Fair",
+    "elasticity_status": "Good",
+    "neumera_insight": "Based on the images, your skin shows..."
+  }},
+  "recommendations": {{
+    "analysis_summary": "Brief summary of why these recommendations",
+    "recommendations": [
+      {{
+        "icon": "💧",
+        "text": "Specific actionable recommendation",
+        "priority": "high",
+        "category": "hydration"
+      }}
+    ]
+  }}
+}}
+
+SCORING RULES:
+- Study VISIBLE skin characteristics in the images
+- Hydration: look for dryness, flaking, plumpness (0=very dry, 100=well hydrated)
+- Redness: inflammation, uneven tone (0=very red, 100=clear even tone)
+- Texture: smoothness, fine lines, roughness (0=very rough, 100=very smooth)
+- Glow: radiance, vitality vs dullness (0=very dull, 100=radiant)
+- Pore health: visibility, size (0=very visible/large, 100=minimized)
+- Elasticity: firmness (0=very loose, 100=very firm)
+
+RECOMMENDATIONS RULES:
+- Generate 3-5 specific, actionable recommendations
+- Base on actual analysis (e.g., if hydration < 70, recommend water/moisturizer)
+- Use appropriate icons: 💧 (water), 🌙 (sleep), 🧴 (skincare), 🥗 (nutrition)
+- Priority: "high" for scores < 60, "medium" for 60-75, "low" for > 75
+- Categories: "hydration", "sleep", "skincare", "nutrition"
+
+User wellness context:
 {context_json}
 """
 
@@ -432,19 +611,31 @@ def _parse_skin_metrics(text: str) -> SkinScanMetrics | None:
 
 
 def _coerce_skin_metrics(payload: Any) -> dict[str, Any]:
+    """NO DEFAULTS - all values must come from AI analysis."""
     if not isinstance(payload, dict):
-        payload = {}
+        return {}
 
-    scores = {
-        "overall_score": _score(payload.get("overall_score"), 75),
-        "hydration_score": _score(payload.get("hydration_score"), 70),
-        "redness_score": _score(payload.get("redness_score"), 25),
-        "texture_score": _score(payload.get("texture_score"), 75),
-        "glow_index": _score(payload.get("glow_index"), 70),
-        "pore_health_score": _score(payload.get("pore_health_score"), 75),
-        "elasticity_score": _score(payload.get("elasticity_score"), 75),
-    }
+    # Validate all required fields exist
+    required_scores = [
+        "overall_score", "hydration_score", "redness_score", 
+        "texture_score", "glow_index", "pore_health_score", "elasticity_score"
+    ]
+    required_statuses = [
+        "hydration_status", "redness_status", "texture_status",
+        "glow_status", "pore_health_status", "elasticity_status"
+    ]
+    
+    # Check if AI provided scores
+    scores = {}
+    for score_key in required_scores:
+        value = payload.get(score_key)
+        if value is None:
+            return {}  # Missing required field
+        scores[score_key] = _score(value, None)  # No default fallback
+        if scores[score_key] is None:
+            return {}
 
+    # Get statuses from AI or derive from scores
     return {
         **scores,
         "hydration_status": _status(payload.get("hydration_status"), scores["hydration_score"]),
@@ -453,34 +644,201 @@ def _coerce_skin_metrics(payload: Any) -> dict[str, Any]:
         "glow_status": _status(payload.get("glow_status"), scores["glow_index"]),
         "pore_health_status": _status(payload.get("pore_health_status"), scores["pore_health_score"]),
         "elasticity_status": _status(payload.get("elasticity_status"), scores["elasticity_score"]),
-        "neumera_insight": str(
-            payload.get("neumera_insight")
-            or "Skin appearance looks generally balanced in this image. Keep hydration, gentle cleansing, SPF, and consistent sleep as priorities, and retake scans in similar lighting for better trend tracking."
-        ),
+        "neumera_insight": str(payload.get("neumera_insight") or ""),
     }
 
 
-def _fallback_skin_metrics() -> SkinScanMetrics:
-    return SkinScanMetrics(
-        overall_score=75,
-        hydration_score=70,
-        redness_score=25,
-        texture_score=75,
-        glow_index=70,
-        pore_health_score=75,
-        elasticity_score=75,
-        hydration_status="Fair",
-        redness_status="Low",
-        texture_status="Fair",
-        glow_status="Fair",
-        pore_health_status="Fair",
-        elasticity_status="Fair",
-        neumera_insight=(
-            "The skin scan image was received, but AI analysis could not be completed. "
-            "Retake the scan in even natural light and keep hydration, gentle cleansing, and SPF consistent."
-        ),
+
+def _parse_recommendations(text: str) -> TodaysRecommendations | None:
+    """Parse AI-generated recommendations from JSON response."""
+    if not text:
+        return None
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        cleaned = "\n".join(line for line in lines if not line.startswith("```")).strip()
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    try:
+        payload = json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+    try:
+        return TodaysRecommendations.model_validate(payload)
+    except Exception:
+        return None
+
+
+def _parse_combined_response(text: str, user_id: int | None) -> dict[str, Any] | None:
+    """Parse combined metrics + recommendations from single AI response."""
+    if not text:
+        print(f"[ERROR] Empty AI response for user {user_id}")
+        return None
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        cleaned = "\n".join(line for line in lines if not line.startswith("```")).strip()
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        print(f"[ERROR] No JSON found in AI response for user {user_id}")
+        return None
+
+    try:
+        payload = json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] JSON parse failed for user {user_id}: {e}")
+        return None
+
+    # Extract metrics and recommendations
+    metrics_data = payload.get("metrics")
+    recommendations_data = payload.get("recommendations")
+
+    if not metrics_data or not recommendations_data:
+        print(f"[ERROR] Missing metrics or recommendations in AI response for user {user_id}")
+        return None
+
+    try:
+        metrics = SkinScanMetrics.model_validate(_coerce_skin_metrics(metrics_data))
+        recommendations = TodaysRecommendations.model_validate(recommendations_data)
+        
+        # Add timestamp if not present
+        if not recommendations.generated_at:
+            recommendations.generated_at = skin_scan_timestamp()
+        
+        return {
+            "metrics": metrics,
+            "recommendations": recommendations,
+        }
+    except Exception as e:
+        print(f"[ERROR] Failed to validate combined response for user {user_id}: {e}")
+        return None
+
+
+def _generate_basic_recommendations(metrics: SkinScanMetrics) -> TodaysRecommendations:
+    """Generate basic recommendations from scores when AI fails.
+    This is a minimal fallback - AI should normally handle this.
+    """
+    recommendations: list[SkinRecommendation] = []
+    issues = []
+
+    if metrics.hydration_score < 70:
+        recommendations.append(
+            SkinRecommendation(
+                icon="💧",
+                text="Drink 500ml extra water before 3pm",
+                priority="high" if metrics.hydration_score < 60 else "medium",
+                category="hydration",
+            )
+        )
+        issues.append("low hydration")
+
+    if metrics.glow_index < 70:
+        recommendations.append(
+            SkinRecommendation(
+                icon="🌙",
+                text="Aim for 7h+ sleep — set 10pm wind-down",
+                priority="medium",
+                category="sleep",
+            )
+        )
+        issues.append("reduced glow")
+
+    if metrics.redness_score > 30 or metrics.texture_score < 70:
+        recommendations.append(
+            SkinRecommendation(
+                icon="🧴",
+                text="Apply SPF 30+ before going outside",
+                priority="high",
+                category="skincare",
+            )
+        )
+        if metrics.redness_score > 30:
+            issues.append("skin redness")
+
+    if metrics.texture_score < 70 or metrics.elasticity_score < 70:
+        recommendations.append(
+            SkinRecommendation(
+                icon="🥗",
+                text="Add Vitamin C rich foods to your next meal",
+                priority="medium",
+                category="nutrition",
+            )
+        )
+
+    if not recommendations:
+        # Skin looks good, add maintenance tips
+        recommendations.append(
+            SkinRecommendation(
+                icon="🧴",
+                text="Maintain your current skincare routine",
+                priority="low",
+                category="skincare",
+            )
+        )
+
+    summary = f"Based on your skin analysis showing {', '.join(issues)}" if issues else "Your skin looks good"
+
+    return TodaysRecommendations(
+        recommendations=recommendations,
+        generated_at=skin_scan_timestamp(),
+        analysis_summary=summary,
     )
 
+
+def _build_recommendations_prompt(
+    metrics: SkinScanMetrics,
+    context: dict[str, Any] | None,
+    user_id: int | None,
+) -> str:
+    """Build prompt for generating recommendations separately (less optimal than combined)."""
+    context_json = _skin_scan_context_json(context)
+    user_context = f" for user_id={user_id}" if user_id else ""
+    
+    return f"""Generate personalized skincare recommendations{user_context} based on this skin analysis:
+
+Skin Metrics:
+- Overall: {metrics.overall_score}/100
+- Hydration: {metrics.hydration_score}/100 ({metrics.hydration_status})
+- Redness: {metrics.redness_score}/100 ({metrics.redness_status})
+- Texture: {metrics.texture_score}/100 ({metrics.texture_status})
+- Glow: {metrics.glow_index}/100 ({metrics.glow_status})
+- Pore Health: {metrics.pore_health_score}/100 ({metrics.pore_health_status})
+- Elasticity: {metrics.elasticity_score}/100 ({metrics.elasticity_status})
+
+Analysis: {metrics.neumera_insight}
+
+Generate this EXACT JSON structure:
+{{
+  "analysis_summary": "Brief summary of key skin concerns",
+  "recommendations": [
+    {{
+      "icon": "💧",
+      "text": "Specific actionable recommendation",
+      "priority": "high",
+      "category": "hydration"
+    }}
+  ]
+}}
+
+RULES:
+- Generate 3-5 specific, actionable recommendations
+- Address the LOWEST scoring areas first
+- Use icons: 💧 (water), 🌙 (sleep), 🧴 (skincare), 🥗 (nutrition)
+- Priority: "high" (scores < 60), "medium" (60-75), "low" (> 75)
+- Categories: "hydration", "sleep", "skincare", "nutrition"
+
+User context:
+{context_json}
+"""
 
 
 def _skin_scan_context_json(context: dict[str, Any] | None) -> str:
