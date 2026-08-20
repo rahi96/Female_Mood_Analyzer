@@ -163,12 +163,15 @@ def analyze_live_skin_scan_session_with_recommendations(
     prompt = _build_combined_analysis_prompt(len(frames), len(selected), context, user_id)
     response_text = _call_skin_scan_session_llm(selected, prompt)
     
+    print(f"[DEBUG] AI Response for user {user_id}: {response_text[:500]}...")
+    
     # Parse combined response
     parsed_data = _parse_combined_response(response_text, user_id)
     if not parsed_data:
+        print(f"[ERROR] Failed to parse AI response for user {user_id}")
+        print(f"[ERROR] Full AI response: {response_text}")
         raise ValueError(
-            "Skin scan analysis failed. Please ensure good lighting and retake the scan. "
-            "If the issue persists, contact support."
+            f"AI analysis failed for user {user_id}. Please ensure good lighting and retake the scan."
         )
     
     return parsed_data["metrics"], parsed_data["recommendations"]
@@ -611,29 +614,36 @@ def _parse_skin_metrics(text: str) -> SkinScanMetrics | None:
 
 
 def _coerce_skin_metrics(payload: Any) -> dict[str, Any]:
-    """NO DEFAULTS - all values must come from AI analysis."""
+    """Coerce AI payload to valid skin metrics. Requires all score fields from AI."""
     if not isinstance(payload, dict):
+        print("[ERROR] _coerce_skin_metrics: payload is not a dict")
         return {}
 
-    # Validate all required fields exist
+    # Extract all score fields (MUST be present)
     required_scores = [
         "overall_score", "hydration_score", "redness_score", 
         "texture_score", "glow_index", "pore_health_score", "elasticity_score"
     ]
-    required_statuses = [
-        "hydration_status", "redness_status", "texture_status",
-        "glow_status", "pore_health_status", "elasticity_status"
-    ]
     
-    # Check if AI provided scores
+    # Check if AI provided all scores
     scores = {}
+    missing_fields = []
     for score_key in required_scores:
         value = payload.get(score_key)
         if value is None:
-            return {}  # Missing required field
-        scores[score_key] = _score(value, None)  # No default fallback
-        if scores[score_key] is None:
+            missing_fields.append(score_key)
+            continue
+        
+        score_value = _score(value, None)
+        if score_value is None:
+            print(f"[ERROR] Invalid score value for {score_key}: {value}")
             return {}
+        scores[score_key] = score_value
+    
+    if missing_fields:
+        print(f"[ERROR] _coerce_skin_metrics: Missing required fields: {missing_fields}")
+        print(f"[ERROR] Payload keys: {list(payload.keys())}")
+        return {}
 
     # Get statuses from AI or derive from scores
     return {
@@ -690,24 +700,38 @@ def _parse_combined_response(text: str, user_id: int | None) -> dict[str, Any] |
     end = cleaned.rfind("}")
     if start == -1 or end == -1 or end <= start:
         print(f"[ERROR] No JSON found in AI response for user {user_id}")
+        print(f"[ERROR] Response text: {cleaned[:200]}")
         return None
 
     try:
         payload = json.loads(cleaned[start : end + 1])
     except json.JSONDecodeError as e:
         print(f"[ERROR] JSON parse failed for user {user_id}: {e}")
+        print(f"[ERROR] JSON text: {cleaned[start:end+1][:300]}")
         return None
 
     # Extract metrics and recommendations
     metrics_data = payload.get("metrics")
     recommendations_data = payload.get("recommendations")
 
-    if not metrics_data or not recommendations_data:
-        print(f"[ERROR] Missing metrics or recommendations in AI response for user {user_id}")
+    if not metrics_data:
+        print(f"[ERROR] Missing 'metrics' in AI response for user {user_id}")
+        print(f"[ERROR] Payload keys: {list(payload.keys())}")
+        return None
+    
+    if not recommendations_data:
+        print(f"[ERROR] Missing 'recommendations' in AI response for user {user_id}")
+        print(f"[ERROR] Payload keys: {list(payload.keys())}")
         return None
 
     try:
-        metrics = SkinScanMetrics.model_validate(_coerce_skin_metrics(metrics_data))
+        # Coerce metrics
+        coerced_metrics = _coerce_skin_metrics(metrics_data)
+        if not coerced_metrics:
+            print(f"[ERROR] _coerce_skin_metrics returned empty dict for user {user_id}")
+            return None
+        
+        metrics = SkinScanMetrics.model_validate(coerced_metrics)
         recommendations = TodaysRecommendations.model_validate(recommendations_data)
         
         # Add timestamp if not present
@@ -720,6 +744,8 @@ def _parse_combined_response(text: str, user_id: int | None) -> dict[str, Any] |
         }
     except Exception as e:
         print(f"[ERROR] Failed to validate combined response for user {user_id}: {e}")
+        print(f"[ERROR] Metrics data: {metrics_data}")
+        print(f"[ERROR] Recommendations data: {recommendations_data}")
         return None
 
 
