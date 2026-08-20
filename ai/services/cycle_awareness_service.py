@@ -96,80 +96,84 @@ def _build_cycle_awareness_prompt(user_profile: Any, snapshot: Any) -> str:
 Backend context JSON:
 {context}
 
-Return JSON with exactly this structure:
+STEP 1 - DETERMINE THE CURRENT PHASE (CRITICAL):
+- First, read the actual cycle_day and phase from the backend context above.
+- The user's CURRENT phase is one of: Menstrual, Follicular, Ovulatory, or Luteal.
+- Typical day ranges (adjust to the user's average cycle length):
+  * Menstrual: Days 1-5 (low energy, estrogen & progesterone low)
+  * Follicular: Days 6-13 (rising energy, estrogen rising)
+  * Ovulatory: Days 14-15 (peak energy, LH & estrogen peak)
+  * Luteal: Days 16-28 (declining energy, progesterone high then dropping)
+
+STEP 2 - GENERATE ALL SECTIONS FOR THE USER'S ACTUAL CURRENT PHASE:
+- EVERY section (current_phase, phase_detail, hormone_levels, what_to_know) MUST describe
+  the SAME phase you determined in Step 1. Do NOT mix phases.
+- If the user is in the Follicular phase, ALL titles and content must say "Follicular phase"
+  (NOT "Luteal phase"). The example below uses Luteal ONLY as a format sample — replace it
+  with the user's real phase.
+
+Return JSON with exactly this structure (replace all phase names/values with the user's ACTUAL current phase):
 {{
   "title": "Cycle Awareness",
   "cycle_context": {{
-    "cycle_day": 17,
-    "phase": "Luteal phase",
-    "average_cycle_length": "27.8d"
+    "cycle_day": <actual cycle day from context>,
+    "phase": "<actual current phase> phase",
+    "average_cycle_length": "<actual avg length>d"
   }},
   "current_phase": {{
     "label": "Currently in",
-    "phase": "Luteal Phase",
-    "day_range": "Days 16-28",
-    "summary": "Progesterone rising"
+    "phase": "<actual current phase> Phase",
+    "day_range": "Days <start>-<end> for this phase",
+    "summary": "<short hormone summary for this phase>"
   }},
   "luteal_phase": {{
-    "title": "Luteal Phase",
-    "subtitle": "Days 16-28 - Progesterone rising",
+    "title": "<actual current phase> Phase",
+    "subtitle": "Days <start>-<end> - <short hormone summary>",
     "cards": [
-      {{
-        "name": "Energy",
-        "status": "Declining",
-        "description": "Energy gradually lowers as the cycle moves toward the next phase.",
-        "icon_key": "zap"
-      }},
-      {{
-        "name": "Skin",
-        "status": "May breakout",
-        "description": "Skin may feel more reactive during the luteal phase.",
-        "icon_key": "sparkles"
-      }},
-      {{
-        "name": "Mood",
-        "status": "Inward",
-        "description": "Mood may turn more reflective or inward.",
-        "icon_key": "brain"
-      }}
+      {{"name": "Energy", "status": "<status for this phase>", "description": "<energy note for this phase>", "icon_key": "zap"}},
+      {{"name": "Skin", "status": "<status for this phase>", "description": "<skin note for this phase>", "icon_key": "sparkles"}},
+      {{"name": "Mood", "status": "<status for this phase>", "description": "<mood note for this phase>", "icon_key": "brain"}}
     ]
   }},
   "hormone_levels": {{
-    "title": "Hormone levels - Luteal phase",
+    "title": "Hormone levels - <actual current phase> phase",
     "hormones": [
-      {{"name": "Estrogen", "description": "Mood, energy, skin", "level": "Mild", "value_percent": 45}},
-      {{"name": "Progesterone", "description": "Temperature, calm", "level": "High", "value_percent": 92}},
-      {{"name": "LH", "description": "Ovulation trigger", "level": "Low", "value_percent": 18}}
+      {{"name": "Estrogen", "description": "Mood, energy, skin", "level": "<level for this phase>", "value_percent": <0-100 for this phase>}},
+      {{"name": "Progesterone", "description": "Temperature, calm", "level": "<level for this phase>", "value_percent": <0-100 for this phase>}},
+      {{"name": "LH", "description": "Ovulation trigger", "level": "<level for this phase>", "value_percent": <0-100 for this phase>}}
     ]
   }},
   "what_to_know": {{
-    "title": "What to know - Luteal phase",
+    "title": "What to know - <actual current phase> phase",
     "items": [
-      {{"label": "BBT", "text": "Body temp rises 0.4F after ovulation; BBT reflects this."}},
-      {{"label": "Energy", "text": "Energy and mood gradually decline toward end of this phase."}},
-      {{"label": "Hormones", "text": "PMS symptoms appear in second half as progesterone peaks then drops."}},
-      {{"label": "Focus", "text": "Detail-oriented, analytical, and solo work suit this phase."}}
+      {{"label": "BBT", "text": "<BBT note relevant to this phase>"}},
+      {{"label": "Energy", "text": "<energy note relevant to this phase>"}},
+      {{"label": "Hormones", "text": "<hormone note relevant to this phase>"}},
+      {{"label": "Focus", "text": "<focus/productivity note relevant to this phase>"}}
     ]
   }},
   "four_phase_cycle": {{
     "title": "Your 4-phase cycle",
     "subtitle": "Tap any phase to understand it.",
     "phases": [
-      {{"name": "Menstrual", "day_range": "D1-5", "energy": "Low", "state": "past"}},
-      {{"name": "Follicular", "day_range": "D6-13", "energy": "Rising", "state": "past"}},
-      {{"name": "Ovulatory", "day_range": "D14-15", "energy": "Peak", "state": "past"}},
-      {{"name": "Luteal", "day_range": "D16-28", "energy": "Falling", "state": "current"}}
+      {{"name": "Menstrual", "day_range": "D1-5", "energy": "Low", "state": "<past|current|upcoming>"}},
+      {{"name": "Follicular", "day_range": "D6-13", "energy": "Rising", "state": "<past|current|upcoming>"}},
+      {{"name": "Ovulatory", "day_range": "D14-15", "energy": "Peak", "state": "<past|current|upcoming>"}},
+      {{"name": "Luteal", "day_range": "D16-28", "energy": "Falling", "state": "<past|current|upcoming>"}}
     ]
   }}
 }}
 
 Requirements:
-- Generate luteal phase Energy, Skin, and Mood cards.
-- Generate hormone levels for Estrogen, Progesterone, and LH in the luteal phase.
-- Generate What to know - Luteal phase with BBT, Energy, Hormones, and Focus items.
-- Generate Your 4-phase cycle with Menstrual, Follicular, Ovulatory, and Luteal phases.
+- ALL sections (current_phase, luteal_phase card block, hormone_levels, what_to_know) MUST match
+  the user's ACTUAL current phase — never default to Luteal unless the user is truly in Luteal.
+- Hormone value_percent must reflect the current phase (e.g., Follicular: estrogen rising, progesterone low, LH low).
+- In four_phase_cycle, set exactly ONE phase to "state":"current" (the user's actual phase),
+  earlier phases to "past", and later phases to "upcoming".
+- Keep the JSON key name "luteal_phase" as-is (it is the UI card container), but its title/subtitle/cards
+  MUST describe the user's ACTUAL current phase.
 - Use cycle day, phase, BBT, OPK/LH, mucus, symptoms, and health snapshot data from backend context when present.
-- If exact values are missing, use cautious UI estimates similar to the example and avoid clinical certainty.
+- If exact values are missing, use cautious phase-appropriate estimates and avoid clinical certainty.
 - Keep all text concise and mobile UI-ready.
 """
 
