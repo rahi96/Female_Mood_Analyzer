@@ -45,6 +45,12 @@ async def engine_discrepancy_note(user_id: int = Query(..., description="User ID
     return _run(service.engine_discrepancy_note, user_id)
 
 
+@router.get("/engine/overview")
+async def engine_overview(user_id: int = Query(..., description="User ID")):
+    """Combined Engine endpoint - returns summary, signal_status, and discrepancy_note in one call."""
+    return _run(service.engine_overview, user_id)
+
+
 @router.get("/calendar/month")
 async def calendar_month_get(user_id: int = Query(..., description="User ID")):
     """Get calendar info for today's date."""

@@ -111,21 +111,7 @@ def current_user_id() -> int:
 # Engine (§2)
 # ---------------------------------------------------------------------------
 
-def engine_summary(user_id: int) -> dict[str, Any]:
-    if VALIDATE_USER_EXISTS and not user_exists(user_id):
-        return {
-            "status": "error",
-            "error_code": "USER_NOT_FOUND",
-            "message": f"User {user_id} does not exist in database",
-            "user_id": user_id,
-        }
-    
-    if not _has_cycle_data(user_id):
-        return _empty_state_response(user_id, "engine_summary")
-    
-    state = _cycle_state(user_id)
-    _require_consent_if_needed(state)
-    reconciliation = _recompute_reconciliation(state)
+def _engine_summary_from_state(state: dict[str, Any], reconciliation: dict[str, Any]) -> dict[str, Any]:
     fertile_start, fertile_end = _fertile_window(reconciliation["calendar_predicted_day"])
     fallback = {
         "cycle_summary": _cycle_summary(state),
@@ -162,14 +148,8 @@ def engine_summary(user_id: int) -> dict[str, Any]:
     )
 
 
-def engine_signal_status(user_id: int) -> dict[str, Any]:
-    if not _has_cycle_data(user_id):
-        return _empty_state_response(user_id, "engine_signal_status")
-    
-    state = _cycle_state(user_id)
-    _require_consent_if_needed(state)
+def _engine_signal_status_from_state(state: dict[str, Any], reconciliation: dict[str, Any]) -> dict[str, Any]:
     today = _today()
-    reconciliation = _recompute_reconciliation(state)
     fallback = {
         "signals": [
             _signal_card(
@@ -195,10 +175,7 @@ def engine_signal_status(user_id: int) -> dict[str, Any]:
     )
 
 
-def engine_discrepancy_note(user_id: int) -> dict[str, Any]:
-    state = _cycle_state(user_id)
-    _require_consent_if_needed(state)
-    reconciliation = _recompute_reconciliation(state)
+def _engine_discrepancy_note_from_state(state: dict[str, Any], reconciliation: dict[str, Any]) -> dict[str, Any]:
     calendar_day = reconciliation.get("calendar_predicted_day")
     bbt_day = reconciliation.get("bbt_confirmed_day")
     if not calendar_day or not bbt_day or calendar_day == bbt_day:
@@ -227,6 +204,74 @@ def engine_discrepancy_note(user_id: int) -> dict[str, Any]:
         fallback,
         max_tokens=400,
     )
+
+
+def engine_summary(user_id: int) -> dict[str, Any]:
+    if VALIDATE_USER_EXISTS and not user_exists(user_id):
+        return {
+            "status": "error",
+            "error_code": "USER_NOT_FOUND",
+            "message": f"User {user_id} does not exist in database",
+            "user_id": user_id,
+        }
+    
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "engine_summary")
+    
+    state = _cycle_state(user_id)
+    _require_consent_if_needed(state)
+    reconciliation = _recompute_reconciliation(state)
+    return _engine_summary_from_state(state, reconciliation)
+
+
+def engine_signal_status(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "engine_signal_status")
+    
+    state = _cycle_state(user_id)
+    _require_consent_if_needed(state)
+    reconciliation = _recompute_reconciliation(state)
+    return _engine_signal_status_from_state(state, reconciliation)
+
+
+def engine_discrepancy_note(user_id: int) -> dict[str, Any]:
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "engine_discrepancy_note")
+    
+    state = _cycle_state(user_id)
+    _require_consent_if_needed(state)
+    reconciliation = _recompute_reconciliation(state)
+    return _engine_discrepancy_note_from_state(state, reconciliation)
+
+
+def engine_overview(user_id: int) -> dict[str, Any]:
+    """OPTIMIZED combined Engine endpoint - calculates state once, returns all three responses."""
+    if VALIDATE_USER_EXISTS and not user_exists(user_id):
+        return {
+            "status": "error",
+            "error_code": "USER_NOT_FOUND",
+            "message": f"User {user_id} does not exist in database",
+            "user_id": user_id,
+        }
+
+    if not _has_cycle_data(user_id):
+        empty = _empty_state_response(user_id, "engine_overview")
+        return {
+            "summary": empty,
+            "signal_status": empty,
+            "discrepancy_note": empty,
+        }
+
+    # Calculate state and reconciliation ONCE (not 3 times)
+    state = _cycle_state(user_id)
+    _require_consent_if_needed(state)
+    reconciliation = _recompute_reconciliation(state)
+
+    return {
+        "summary": _engine_summary_from_state(state, reconciliation),
+        "signal_status": _engine_signal_status_from_state(state, reconciliation),
+        "discrepancy_note": _engine_discrepancy_note_from_state(state, reconciliation),
+    }
 
 
 # ---------------------------------------------------------------------------
