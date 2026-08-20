@@ -14,6 +14,7 @@ from ai.services.skin_scan_service import (
     _optional_int,
     analyze_live_skin_scan,
     analyze_live_skin_scan_session,
+    analyze_live_skin_scan_session_with_recommendations,
     extract_skin_scan_user_id,
     fetch_skin_scan_context,
     fetch_skin_scan_image_from_url,
