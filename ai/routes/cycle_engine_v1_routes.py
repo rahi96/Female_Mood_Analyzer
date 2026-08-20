@@ -108,6 +108,12 @@ async def ttc_priority_banner(user_id: int = Query(..., description="User ID")):
     return _run(service.ttc_priority_banner, user_id)
 
 
+@router.get("/ttc/overview")
+async def ttc_overview(user_id: int = Query(..., description="User ID")):
+    """Combined TTC endpoint - returns surge_banner, priority_map, and priority_banner in one call."""
+    return _run(service.ttc_overview, user_id)
+
+
 @router.get("/awareness/current-phase")
 async def awareness_current_phase(user_id: int = Query(..., description="User ID")):
     return _run(service.awareness_current_phase, user_id)

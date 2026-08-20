@@ -1030,12 +1030,40 @@ def reconciliation_current(user_id: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def ttc_surge_banner(user_id: int) -> dict[str, Any]:
+    """AI-only surge banner - no fallback."""
     if not _has_cycle_data(user_id):
         return _empty_state_response(user_id, "ttc_surge_banner")
     
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     reconciliation = _recompute_reconciliation(state)
+    return _ttc_surge_banner_ai_only(state, reconciliation)
+
+
+def ttc_priority_map(user_id: int) -> dict[str, Any]:
+    """AI-only priority map - no fallback."""
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "ttc_priority_map")
+    
+    state = _cycle_state(user_id)
+    _require_consent_if_needed(state)
+    reconciliation = _recompute_reconciliation(state)
+    return _ttc_priority_map_ai_only(state, reconciliation)
+
+
+def ttc_priority_banner(user_id: int) -> dict[str, Any]:
+    """AI-only priority banner - no fallback."""
+    if not _has_cycle_data(user_id):
+        return _empty_state_response(user_id, "ttc_priority_banner")
+    
+    state = _cycle_state(user_id)
+    _require_consent_if_needed(state)
+    reconciliation = _recompute_reconciliation(state)
+    return _ttc_priority_banner_ai_only(state, reconciliation)
+
+
+def _ttc_surge_banner_ai_only(state: dict[str, Any], reconciliation: dict[str, Any]) -> dict[str, Any]:
+    """AI-only surge banner - no fallback."""
     coverline = _coverline_status(state)
     surge_at = state.get("lh_surge_at")
     active = False
@@ -1045,127 +1073,104 @@ def ttc_surge_banner(user_id: int) -> dict[str, Any]:
         if 0 <= elapsed <= 36:
             active = True
             hours_remaining = max(0, int(round(36 - elapsed)))
-    message = (
-        f"LH surge window is open — about {hours_remaining} hours remain in this fertile window."
-        if active
-        else "No active LH surge window right now."
-    )
-    fallback = {
-        "active": active,
-        "message": message,
-        "hours_remaining_estimate": hours_remaining,
-        "cycle_day": state["current_cycle_day"],
-        "lh_surge_day": reconciliation.get("lh_surge_day"),
-    }
-    return _ai_endpoint_response(
-        "ttc_surge_banner",
-        state,
-        (
-            "Return TTC surge banner JSON: "
-            "{active, message, hours_remaining_estimate, cycle_day, lh_surge_day}. "
-            "Active only when LH surge is recent (~36h) and BBT has not confirmed yet. "
-            "Message should be calm and actionable, based on the data."
-        ),
-        fallback,
-        max_tokens=500,
-    )
-
-
-def ttc_priority_map(user_id: int) -> dict[str, Any]:
-    if not _has_cycle_data(user_id):
-        return _empty_state_response(user_id, "ttc_priority_map")
     
+    context = _analysis_context(state)
+    prompt = (
+        f"Endpoint: ttc_surge_banner\n"
+        f"Today: {_today().isoformat()}\n\n"
+        "Backend + local cycle context (analyze this data):\n"
+        f"{_to_context_json(context)}\n\n"
+        "Return TTC surge banner JSON: "
+        "{active, message, hours_remaining_estimate, cycle_day, lh_surge_day}. "
+        "Active only when LH surge is recent (~36h) and BBT has not confirmed yet. "
+        "Message should be calm and actionable, based on the data.\n\n"
+        "Return one JSON object only."
+    )
+    text = _call_ai_json(prompt, max_tokens=500)
+    parsed = _parse_json_object(text)
+    if not isinstance(parsed, dict) or not parsed:
+        raise ValueError("AI failed to generate surge_banner response")
+    
+    _coerce_int_fields(parsed)
+    parsed["ai_generated"] = True
+    parsed["sources"] = state.get("sources")
+    if state.get("backend_errors"):
+        parsed["backend_errors"] = state["backend_errors"]
+    return parsed
+
+
+def _ttc_priority_map_ai_only(state: dict[str, Any], reconciliation: dict[str, Any]) -> dict[str, Any]:
+    """AI-only priority map - no fallback."""
+    context = _analysis_context(state)
+    prompt = (
+        f"Endpoint: ttc_priority_map\n"
+        f"Today: {_today().isoformat()}\n\n"
+        "Backend + local cycle context (analyze this data):\n"
+        f"{_to_context_json(context)}\n\n"
+        "Return JSON {cycle_day, ranges:[{start_day,end_day,label,priority}]}. "
+        "Priorities: sperm viability ~5 days before ovulation = moderate; "
+        "LH surge day = high; ovulation day = highest; post-ovulation = low.\n\n"
+        "Return one JSON object only."
+    )
+    text = _call_ai_json(prompt, max_tokens=800)
+    parsed = _parse_json_object(text)
+    if not isinstance(parsed, dict) or not parsed:
+        raise ValueError("AI failed to generate priority_map response")
+    
+    _coerce_int_fields(parsed)
+    parsed["ai_generated"] = True
+    parsed["sources"] = state.get("sources")
+    if state.get("backend_errors"):
+        parsed["backend_errors"] = state["backend_errors"]
+    return parsed
+
+
+def _ttc_priority_banner_ai_only(state: dict[str, Any], reconciliation: dict[str, Any]) -> dict[str, Any]:
+    """AI-only priority banner - no fallback."""
+    context = _analysis_context(state)
+    prompt = (
+        f"Endpoint: ttc_priority_banner\n"
+        f"Today: {_today().isoformat()}\n\n"
+        "Backend + local cycle context (analyze this data):\n"
+        f"{_to_context_json(context)}\n\n"
+        "Return JSON {priority, label, cycle_day, message}. "
+        "Choose the highest current priority from the user's cycle data and write one calm sentence.\n\n"
+        "Return one JSON object only."
+    )
+    text = _call_ai_json(prompt, max_tokens=500)
+    parsed = _parse_json_object(text)
+    if not isinstance(parsed, dict) or not parsed:
+        raise ValueError("AI failed to generate priority_banner response")
+    
+    _coerce_int_fields(parsed)
+    parsed["ai_generated"] = True
+    parsed["sources"] = state.get("sources")
+    if state.get("backend_errors"):
+        parsed["backend_errors"] = state["backend_errors"]
+    return parsed
+
+
+def ttc_overview(user_id: int) -> dict[str, Any]:
+    """OPTIMIZED combined TTC endpoint - calculates once, AI-only responses (no fallbacks)."""
+    if not _has_cycle_data(user_id):
+        empty = _empty_state_response(user_id, "ttc_overview")
+        return {
+            "surge_banner": empty,
+            "priority_map": empty,
+            "priority_banner": empty,
+        }
+    
+    # ✅ Calculate state and reconciliation ONCE (not 3 times)
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     reconciliation = _recompute_reconciliation(state)
-    peak = reconciliation.get("final_confirmed_day") or reconciliation["calendar_predicted_day"]
-    lh_day = reconciliation.get("lh_surge_day")
-    ranges = [
-        {
-            "start_day": max(1, peak - SPERM_VIABILITY_DAYS),
-            "end_day": max(1, peak - 1),
-            "label": "sperm_viability_window",
-            "priority": "moderate",
-        },
-    ]
-    if lh_day:
-        ranges.append(
-            {
-                "start_day": lh_day,
-                "end_day": lh_day,
-                "label": "lh_surge_day",
-                "priority": "high",
-            }
-        )
-    ranges.append(
-        {
-            "start_day": peak,
-            "end_day": peak,
-            "label": "predicted_ovulation_window",
-            "priority": "highest",
-        }
-    )
-    ranges.append(
-        {
-            "start_day": peak + 1,
-            "end_day": int(round(state["avg_cycle_length"])),
-            "label": "post_ovulation",
-            "priority": "low",
-        }
-    )
-    fallback = {"cycle_day": state["current_cycle_day"], "ranges": ranges}
-    return _ai_endpoint_response(
-        "ttc_priority_map",
-        state,
-        (
-            "Return JSON {cycle_day, ranges:[{start_day,end_day,label,priority}]}. "
-            "Priorities: sperm viability ~5 days before ovulation = moderate; "
-            "LH surge day = high; ovulation day = highest; post-ovulation = low."
-        ),
-        fallback,
-        max_tokens=800,
-    )
-
-
-def ttc_priority_banner(user_id: int) -> dict[str, Any]:
-    if not _has_cycle_data(user_id):
-        return _empty_state_response(user_id, "ttc_priority_banner")
     
-    state = _cycle_state(user_id)
-    _require_consent_if_needed(state)
-    reconciliation = _recompute_reconciliation(state)
-    peak = reconciliation.get("final_confirmed_day") or reconciliation["calendar_predicted_day"]
-    current_day = state["current_cycle_day"]
-    if current_day == peak:
-        priority, label = "highest", "predicted_ovulation_window"
-    elif reconciliation.get("lh_surge_day") == current_day:
-        priority, label = "high", "lh_surge_day"
-    elif peak - SPERM_VIABILITY_DAYS <= current_day < peak:
-        priority, label = "moderate", "sperm_viability_window"
-    else:
-        priority, label = "low", "outside_priority_window"
-    fallbacks = {
-        "highest": "This is your highest priority moment — act within the next 24 hours.",
-        "high": "Priority is high today — your fertile window is peaking.",
-        "moderate": "This is a moderate-priority fertile day — timing still matters.",
-        "low": "Fertility priority is low right now.",
+    # ✅ Generate all three AI responses with shared state
+    return {
+        "surge_banner": _ttc_surge_banner_ai_only(state, reconciliation),
+        "priority_map": _ttc_priority_map_ai_only(state, reconciliation),
+        "priority_banner": _ttc_priority_banner_ai_only(state, reconciliation),
     }
-    fallback = {
-        "priority": priority,
-        "label": label,
-        "cycle_day": current_day,
-        "message": fallbacks[priority],
-    }
-    return _ai_endpoint_response(
-        "ttc_priority_banner",
-        state,
-        (
-            "Return JSON {priority, label, cycle_day, message}. "
-            "Choose the highest current priority from the user's cycle data and write one calm sentence."
-        ),
-        fallback,
-        max_tokens=500,
-    )
 
 
 # ---------------------------------------------------------------------------
