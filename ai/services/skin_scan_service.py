@@ -541,7 +541,7 @@ def _call_skin_scan_llm(image_bytes: bytes, media_type: str, prompt: str) -> str
     return _chat_skin_scan(content)
 
 
-def _call_skin_scan_session_llm(frames: list[dict[str, Any]], prompt: str) -> str:
+def _call_skin_scan_session_llm(frames: list[dict[str, Any]], prompt: str, max_tokens: int = 2500) -> str:
     content: list[dict[str, Any]] = []
     for index, frame in enumerate(frames, start=1):
         image_bytes = frame.get("image_bytes") or b""
@@ -559,11 +559,12 @@ def _call_skin_scan_session_llm(frames: list[dict[str, Any]], prompt: str) -> st
         )
         content.append({"type": "text", "text": f"Frame {index} of {len(frames)}"})
     content.append({"type": "text", "text": prompt})
-    return _chat_skin_scan(content)
+    return _chat_skin_scan(content, max_tokens=max_tokens)
 
 
-def _chat_skin_scan(content: list[dict[str, Any]]) -> str:
+def _chat_skin_scan(content: list[dict[str, Any]], max_tokens: int = 1200) -> str:
     if not any(block.get("type") == "image" for block in content):
+        print("[ERROR] _chat_skin_scan: No image blocks in content")
         return ""
 
     attempts = len(LLM_RETRY_DELAYS_SECONDS) + 1
@@ -574,10 +575,11 @@ def _chat_skin_scan(content: list[dict[str, Any]]) -> str:
             response = ClaudeLLM().chat(
                 messages=messages,
                 system=SKIN_SCAN_SYSTEM_PROMPT,
-                max_tokens=1200,
+                max_tokens=max_tokens,
             )
             return LLMResponseParser.extract_text(response)
         except Exception as exc:
+            print(f"[ERROR] _chat_skin_scan attempt {attempt+1} failed: {exc}")
             is_last_attempt = attempt == attempts - 1
             if not _is_retryable_llm_error(exc):
                 raise
@@ -732,11 +734,11 @@ def _parse_combined_response(text: str, user_id: int | None) -> dict[str, Any] |
             return None
         
         metrics = SkinScanMetrics.model_validate(coerced_metrics)
+
+        # Inject timestamp before validation so a missing field never fails validation
+        if isinstance(recommendations_data, dict) and not recommendations_data.get("generated_at"):
+            recommendations_data["generated_at"] = skin_scan_timestamp()
         recommendations = TodaysRecommendations.model_validate(recommendations_data)
-        
-        # Add timestamp if not present
-        if not recommendations.generated_at:
-            recommendations.generated_at = skin_scan_timestamp()
         
         return {
             "metrics": metrics,

@@ -29,8 +29,8 @@ class SkinRecommendation(BaseModel):
 
 class TodaysRecommendations(BaseModel):
     recommendations: list[SkinRecommendation]
-    generated_at: str
-    analysis_summary: str
+    generated_at: str = ""
+    analysis_summary: str = ""
 
 
 class SkinScanResponse(SkinScanMetrics):
