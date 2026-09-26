@@ -79,24 +79,28 @@ router = APIRouter(
 )
 async def get_vitality(
     user_id: int = Query(..., gt=0, description="User ID (must be > 0)"),
-    years_back: int = Query(6, ge=1, le=10, description="Years of history to analyze (1-10)"),
     include_ai_insights: bool = Query(True, description="Include Claude AI insights")
 ) -> VitalityResponse:
     """
     Calculate vitality index and health dimensions.
     
+    Automatically analyzes last 6 years of health data.
+    
     **Query Parameters:**
     - `user_id` (required): User ID
-    - `years_back` (optional, default=6): Years of history to analyze (1-10)
     - `include_ai_insights` (optional, default=True): Include Claude LLM insights
+    
+    **Data Range:** Always analyzes last 6 years of history
     
     **Example Request:**
     ```
-    GET /api/v1/lifelong-thriving/vitality?user_id=2&years_back=6&include_ai_insights=true
+    GET /api/v1/lifelong-thriving/vitality?user_id=2&include_ai_insights=true
+    GET /api/v1/lifelong-thriving/vitality?user_id=2
     ```
     """
     try:
-        # Create service and get vitality
+        # Create service and get vitality (always use 6 years of data)
+        years_back = 6
         service = VitalityService(user_id=user_id, years_back=years_back)
         response = service.get_vitality_overview()
         
@@ -155,25 +159,28 @@ async def get_vitality(
 )
 async def get_life_arc(
     user_id: int = Query(..., gt=0, description="User ID (must be > 0)"),
-    months_back: int = Query(6, ge=1, le=36, description="Months of history to analyze (1-36)"),
     include_ai_insights: bool = Query(True, description="Include AI descriptions")
 ) -> LifeArcResponse:
     """
     Generate life arc timeline with health milestones.
     
+    Automatically analyzes last 6 years (72 months) of health data.
+    
     **Query Parameters:**
     - `user_id` (required): User ID
-    - `months_back` (optional, default=6): Months of history to analyze (1-36)
     - `include_ai_insights` (optional, default=True): Include AI descriptions
+    
+    **Data Range:** Always analyzes last 6 years of history
     
     **Example Requests:**
     ```
-    GET /api/v1/lifelong-thriving/life-arc?user_id=2&months_back=6&include_ai_insights=true
-    GET /api/v1/lifelong-thriving/life-arc?user_id=2&months_back=24
+    GET /api/v1/lifelong-thriving/life-arc?user_id=2&include_ai_insights=true
+    GET /api/v1/lifelong-thriving/life-arc?user_id=2
     ```
     """
     try:
-        # Create service and get timeline
+        # Create service and get timeline (always use 72 months = 6 years of data)
+        months_back = 72
         service = LifeArcService(user_id=user_id, months_back=months_back)
         response = service.get_life_arc_timeline()
         

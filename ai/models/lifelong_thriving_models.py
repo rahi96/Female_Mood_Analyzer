@@ -2,7 +2,7 @@
 
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from enum import Enum
 
 
@@ -173,6 +173,7 @@ class LifeArcResponse(BaseModel):
 
 class ReminderStatus(str, Enum):
     """Status of a preventative health reminder."""
+    NOT_STARTED = "not_started"
     OVERDUE = "overdue"
     DUE_SOON = "due_soon"
     SCHEDULED = "scheduled"
@@ -182,10 +183,10 @@ class ReminderStatus(str, Enum):
 
 class HealthReminder(BaseModel):
     """Single preventative health reminder."""
-    id: str = Field(..., description="Unique reminder ID")
+    id: int = Field(..., description="Unique reminder ID")
     type: str = Field(..., description="Screening type (e.g., Mammogram, Bone Density)")
     status: ReminderStatus = Field(..., description="Current status")
-    priority: int = Field(..., ge=1, le=5, description="Priority 1-5 (1=highest)")
+    priority: str = Field(..., description="Priority level (critical, high, medium, low)")
     
     last_done: Optional[date] = Field(None, description="Date of last screening")
     due_date: Optional[date] = Field(None, description="Evidence-based due date")
@@ -213,6 +214,7 @@ class MobilityStressMetric(BaseModel):
 class RemindersSnapshot(BaseModel):
     """Summary of all reminders."""
     total_reminders: int
+    not_started: int = 0
     overdue: int
     due_soon: int
     scheduled: int
@@ -228,7 +230,7 @@ class RemindersResponse(BaseModel):
         description="Mobility & stress indicators"
     )
     summary: RemindersSnapshot = Field(..., description="Summary statistics")
-    last_updated: datetime = Field(default_factory=datetime.now)
+    last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
     class Config:
         json_schema_extra = {
