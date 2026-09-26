@@ -67,16 +67,12 @@ class TodayScan(BaseModel):
 
 class AIInsights(BaseModel):
     overall_assessment: str
-    phase_impact: str
-    sleep_correlation: str
     key_focus_areas: List[str]
     recommendations: List[str]
-    routine_suggestion: str
     confidence_score: int
 
 class BeautyResponse(BaseModel):
     today: TodayScan
     history: List[HistoryItem]
     correlations: Correlations
-    ai_insights: Optional[AIInsights] = Field(None, description="Null if no skin scan data available")
     tabs: List[str] = Field(default_factory=lambda: ["Today", "History", "Correlations"], description="UI tab labels")
