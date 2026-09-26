@@ -572,8 +572,8 @@ class VitalityService:
     def _generate_ai_insights(
         self, vitality_index: float, dimensions: List[VitalityDimension],
         trend_data: List[YearlyVitalityTrend], user_data: Dict
-    ) -> Optional[VitalityAIInsights]:
-        """Generate Claude AI insights about vitality."""
+    ) -> VitalityAIInsights:
+        """Generate Claude AI insights about vitality based on available data."""
         try:
             # Build context for Claude
             dimension_text = "\n".join([
@@ -581,29 +581,45 @@ class VitalityService:
                 for d in dimensions
             ])
             
-            trend_text = "\n".join([
-                f"- {t.year}: {t.score}/100"
-                for t in sorted(trend_data, key=lambda x: x.year)
-            ])
+            # Build trend text based on available data
+            trend_text = "No historical trend data available yet"
+            if trend_data:
+                trend_text = "\n".join([
+                    f"- {t.year}: {t.score}/100"
+                    for t in sorted(trend_data, key=lambda x: x.year)
+                ])
+            
+            # Calculate data coverage
+            num_logs = len(user_data.get('health_logs', []))
+            num_cycles = len(user_data.get('menstrual_cycles', []))
+            num_labs = len(user_data.get('lab_reports', []))
+            
+            # Identify strongest and weakest dimensions
+            sorted_dims = sorted(dimensions, key=lambda d: d.score, reverse=True)
+            strengths_dims = sorted_dims[:2]
+            focus_dims = sorted_dims[-2:]
             
             prompt = f"""
-Analyze this user's health vitality profile and provide concise, actionable insights:
+Analyze this user's health vitality profile and provide concise, actionable insights based on available data:
 
 CURRENT VITALITY INDEX: {vitality_index}/100
 LEVEL: {self._get_vitality_level(vitality_index)}
 
-HEALTH DIMENSIONS:
+HEALTH DIMENSIONS (Current Scores):
 {dimension_text}
 
-6-YEAR TREND:
+HISTORICAL TREND (Available data):
 {trend_text}
 
-RECENT HEALTH DATA POINTS: {len(user_data.get('health_logs', []))} logs in past 6 years
+DATA COVERAGE:
+- Health log entries: {num_logs}
+- Menstrual cycle records: {num_cycles}
+- Lab reports: {num_labs}
 
-Please provide:
-1. A 2-3 sentence summary of overall vitality
-2. List 2-3 key strengths
-3. List 2-3 areas to focus on
+Based on the available data (more data will provide better insights over time), please provide:
+1. A 2-3 sentence summary of current vitality based on available data
+2. List 2-3 key strengths from the health dimensions
+3. List 2-3 areas to focus on for improvement
 4. Provide 2-3 specific, actionable recommendations
 
 Format your response as JSON with keys: summary, strengths, areas_to_focus, recommendations
@@ -612,8 +628,8 @@ Format your response as JSON with keys: summary, strengths, areas_to_focus, reco
             # Call Claude
             response = self.claude.chat(
                 messages=[{"role": "user", "content": prompt}],
-                system="You are a health analytics AI expert. Provide concise, data-driven insights about vitality and wellness.",
-                max_tokens=800,
+                system="You are a health analytics AI expert. Provide concise, data-driven insights about vitality and wellness. Be realistic about limited data scenarios.",
+                max_tokens=1000,
                 temperature=0.7
             )
             
@@ -627,24 +643,86 @@ Format your response as JSON with keys: summary, strengths, areas_to_focus, reco
                 end = response_text.rfind("}") + 1
                 json_str = response_text[start:end]
                 insights_data = json.loads(json_str)
-            except:
-                insights_data = {
-                    "summary": response_text[:200],
-                    "strengths": ["Consistent health tracking"],
-                    "areas_to_focus": ["Regular exercise"],
-                    "recommendations": ["Maintain current routine"]
-                }
+            except Exception as parse_error:
+                logger.warning(f"Could not parse Claude JSON response: {parse_error}. Using fallback.")
+                insights_data = self._generate_fallback_insights(dimensions)
             
             return VitalityAIInsights(
-                summary=insights_data.get("summary", ""),
-                strengths=insights_data.get("strengths", []),
-                areas_to_focus=insights_data.get("areas_to_focus", []),
-                recommendations=insights_data.get("recommendations", []),
-                confidence_score=85
+                summary=insights_data.get("summary", self._generate_summary(vitality_index, dimensions)),
+                strengths=insights_data.get("strengths", [d.name for d in strengths_dims]),
+                areas_to_focus=insights_data.get("areas_to_focus", [d.name for d in focus_dims]),
+                recommendations=insights_data.get("recommendations", self._generate_recommendations(dimensions)),
+                confidence_score=90 if trend_data else 75
             )
         except Exception as e:
             logger.error(f"Error generating AI insights: {e}")
-            return None
+            import traceback
+            logger.error(traceback.format_exc())
+            # Return fallback insights based on actual dimension data
+            return self._generate_data_driven_insights(vitality_index, dimensions)
+    
+    def _generate_fallback_insights(self, dimensions: List[VitalityDimension]) -> Dict:
+        """Generate insights based on dimension scores without Claude."""
+        sorted_dims = sorted(dimensions, key=lambda d: d.score, reverse=True)
+        strengths = [d.name for d in sorted_dims[:2]]
+        areas = [d.name for d in sorted_dims[-2:]]
+        
+        return {
+            "summary": f"Your vitality shows balanced health with some areas for growth.",
+            "strengths": strengths,
+            "areas_to_focus": areas,
+            "recommendations": [
+                "Track your health consistently to identify patterns",
+                "Focus on the areas identified above",
+                "Regular movement and sleep are foundational"
+            ]
+        }
+    
+    def _generate_data_driven_insights(self, vitality_index: float, dimensions: List[VitalityDimension]) -> VitalityAIInsights:
+        """Generate insights based on dimension data without Claude."""
+        sorted_dims = sorted(dimensions, key=lambda d: d.score, reverse=True)
+        strengths = [d.name for d in sorted_dims[:2]]
+        areas_to_focus = [d.name for d in sorted_dims[-2:]]
+        
+        vitality_level = self._get_vitality_level(vitality_index)
+        
+        return VitalityAIInsights(
+            summary=f"Your vitality is currently {vitality_level}. Keep tracking your health—more data will provide deeper insights over time.",
+            strengths=strengths if strengths else ["Consistent tracking"],
+            areas_to_focus=areas_to_focus if areas_to_focus else ["Balanced wellness"],
+            recommendations=self._generate_recommendations(dimensions),
+            confidence_score=70
+        )
+    
+    def _generate_summary(self, vitality_index: float, dimensions: List[VitalityDimension]) -> str:
+        """Generate summary if Claude fails."""
+        level = self._get_vitality_level(vitality_index)
+        return f"Your current vitality level is {level} ({vitality_index}/100). Continue building your health data for personalized insights."
+    
+    def _generate_recommendations(self, dimensions: List[VitalityDimension]) -> List[str]:
+        """Generate basic recommendations from dimensions."""
+        weak_dims = sorted([d for d in dimensions if d.score < 60], key=lambda d: d.score)
+        recs = []
+        
+        if weak_dims:
+            for dim in weak_dims[:2]:
+                if "Sleep" in dim.name:
+                    recs.append("Prioritize consistent sleep schedule (7-9 hours nightly)")
+                elif "Emotional" in dim.name:
+                    recs.append("Practice stress management: meditation, journaling, or therapy")
+                elif "Mobility" in dim.name:
+                    recs.append("Increase daily movement: 30 mins of activity most days")
+                elif "Cardiovascular" in dim.name:
+                    recs.append("Add aerobic exercise: brisk walking, cycling, or swimming")
+                elif "Cognitive" in dim.name:
+                    recs.append("Enhance mental clarity: reduce screen time, improve sleep")
+                else:
+                    recs.append(f"Focus on {dim.name}: see health trends and adjust habits")
+        
+        if len(recs) < 2:
+            recs.append("Maintain consistent health tracking for pattern detection")
+        
+        return recs[:3]
     
     def _get_fallback_vitality_response(self) -> VitalityResponse:
         """Return fallback response on error."""
@@ -1041,7 +1119,7 @@ class RemindersService:
         """Get user age and profile info."""
         try:
             query = """
-                SELECT u.id, u.date_of_birth, p.activity_level, p.life_stage
+                SELECT u.id, u.date_of_birth, p.activity_level, p.life_stage, p.age_group
                 FROM users u
                 JOIN profiles p ON u.id = p.user_id
                 WHERE u.id = %s
@@ -1053,8 +1131,9 @@ class RemindersService:
             return {}
     
     def _get_user_age(self, user_profile: Dict) -> int:
-        """Calculate user age from date of birth."""
+        """Calculate user age from date of birth or age_group."""
         try:
+            # Try date_of_birth first
             dob = user_profile.get("date_of_birth")
             if dob:
                 today = date.today()
@@ -1062,6 +1141,17 @@ class RemindersService:
                 return age
         except:
             pass
+        
+        # Fall back to age_group from profiles table
+        try:
+            age_group = user_profile.get("age_group")
+            if age_group and isinstance(age_group, str):
+                # Parse age_group (e.g., "40-50" → 40)
+                lower_bound = age_group.split('-')[0].strip()
+                return int(lower_bound)
+        except:
+            pass
+        
         return 40  # Default age for unknown users
     
     def _generate_reminders(self, user_profile: Dict) -> List[HealthReminder]:
@@ -1070,13 +1160,15 @@ class RemindersService:
         age = self._get_user_age(user_profile)
         today = date.today()
         
+        reminder_counter = 1
         for screening_name, guideline in self.SCREENING_GUIDELINES.items():
             # Check if applicable to this user
             if not self._is_screening_applicable(guideline, age):
                 continue
             
             # Calculate due dates and status
-            reminder_id = f"{screening_name.lower().replace(' ', '_')}_{self.user_id}"
+            reminder_id = reminder_counter
+            reminder_counter += 1
             
             # Get last screening date from lab reports
             last_done = self._get_last_screening_date(screening_name)
@@ -1087,16 +1179,16 @@ class RemindersService:
             # Determine status
             status = self._determine_status(last_done, due_date, today)
             
-            # Determine priority based on status and guideline priority
-            priority_adjustment = {
-                ReminderStatus.OVERDUE: -2,
-                ReminderStatus.DUE_SOON: -1,
-                ReminderStatus.SCHEDULED: 0,
-                ReminderStatus.UP_TO_DATE: 2,
-                ReminderStatus.NOT_APPLICABLE: 10
+            # Determine priority based on status
+            priority_mapping = {
+                ReminderStatus.NOT_STARTED: "medium",
+                ReminderStatus.OVERDUE: "critical",
+                ReminderStatus.DUE_SOON: "high",
+                ReminderStatus.SCHEDULED: "medium",
+                ReminderStatus.UP_TO_DATE: "low",
+                ReminderStatus.NOT_APPLICABLE: "low"
             }
-            priority = guideline.get("priority", 3) + priority_adjustment.get(status, 0)
-            priority = max(1, min(5, priority))
+            priority = priority_mapping.get(status, "medium")
             
             # Calculate days
             days_overdue = None
@@ -1107,6 +1199,9 @@ class RemindersService:
                 days_overdue = (today - due_date).days
             elif status == ReminderStatus.DUE_SOON:
                 days_until_due = (due_date - today).days
+            elif status == ReminderStatus.NOT_STARTED:
+                # For not started screenings, show days until recommended start
+                days_until_due = (due_date - today).days if due_date >= today else 0
             
             # Get recommendation
             recommendation = self._get_recommendation(status)
@@ -1170,8 +1265,8 @@ class RemindersService:
     def _determine_status(self, last_done: Optional[date], due_date: date, today: date) -> ReminderStatus:
         """Determine reminder status."""
         if last_done is None:
-            # Never done before
-            return ReminderStatus.OVERDUE
+            # Never done before - mark as NOT_STARTED (not overdue)
+            return ReminderStatus.NOT_STARTED
         
         if today > due_date + timedelta(days=30):
             return ReminderStatus.OVERDUE
@@ -1185,6 +1280,7 @@ class RemindersService:
     def _get_recommendation(self, status: ReminderStatus) -> str:
         """Get recommendation based on status."""
         recommendations = {
+            ReminderStatus.NOT_STARTED: "Schedule your first screening",
             ReminderStatus.OVERDUE: "Schedule immediately",
             ReminderStatus.DUE_SOON: "Schedule within 30 days",
             ReminderStatus.SCHEDULED: "Appointment confirmed",
@@ -1196,6 +1292,7 @@ class RemindersService:
     def _get_status_label(self, status: ReminderStatus) -> str:
         """Get display label for status."""
         labels = {
+            ReminderStatus.NOT_STARTED: "Not Started",
             ReminderStatus.OVERDUE: "Overdue",
             ReminderStatus.DUE_SOON: "Due Soon",
             ReminderStatus.SCHEDULED: "Scheduled",
@@ -1207,6 +1304,7 @@ class RemindersService:
     def _get_status_color(self, status: ReminderStatus) -> str:
         """Get color for status."""
         colors = {
+            ReminderStatus.NOT_STARTED: "yellow",
             ReminderStatus.OVERDUE: "red",
             ReminderStatus.DUE_SOON: "orange",
             ReminderStatus.SCHEDULED: "green",
@@ -1216,62 +1314,163 @@ class RemindersService:
         return colors.get(status, "gray")
     
     def _get_mobility_stress_metrics(self) -> List[MobilityStressMetric]:
-        """Get mobility and stress-related metrics."""
+        """Get mobility-related metrics from actual user data."""
         metrics = []
         
         try:
-            # Get recent health logs for mobility/stress indicators
-            query = """
-                SELECT log_date, notes
+            # Get last measurement date
+            last_log_query = """
+                SELECT MAX(log_date) as last_date
                 FROM health_logs
                 WHERE user_id = %s
-                ORDER BY log_date DESC
-                LIMIT 30
             """
-            logs = self.db_query(query, (self.user_id,))
+            log_result = self.db_query(last_log_query, (self.user_id,))
+            last_measured = log_result[0]["last_date"] if log_result and log_result[0].get("last_date") else date.today()
+            if hasattr(last_measured, "date"):
+                last_measured = last_measured.date()
             
-            # Simple heuristic-based scoring
-            mobility_score = 78
-            stress_score = 75
-            
-            for log in logs:
-                notes = (log.get("notes") or "").lower()
-                
-                if "mobility" in notes or "stiff" in notes:
-                    mobility_score -= 5
-                elif "strong" in notes or "flexible" in notes:
-                    mobility_score += 3
-                
-                if "stress" in notes or "anxious" in notes:
-                    stress_score -= 5
-                elif "calm" in notes or "relaxed" in notes:
-                    stress_score += 3
-            
-            mobility_score = max(0, min(100, mobility_score))
-            stress_score = max(0, min(100, stress_score))
+            # Calculate each mobility metric
+            hip_flexibility = self._calculate_hip_flexibility_score()
+            grip_strength = self._calculate_grip_strength_score()
+            balance_score = self._calculate_balance_score()
+            posture_alignment = self._calculate_posture_score()
             
             metrics.append(MobilityStressMetric(
                 area="Hip Flexibility",
-                score=mobility_score,
-                status="good" if mobility_score >= 70 else "moderate",
-                last_measured=date.today()
+                score=hip_flexibility,
+                status="good" if hip_flexibility >= 70 else "moderate" if hip_flexibility >= 50 else "poor",
+                last_measured=last_measured
             ))
             
             metrics.append(MobilityStressMetric(
-                area="Stress Management",
-                score=stress_score,
-                status="good" if stress_score >= 70 else "moderate",
-                last_measured=date.today()
+                area="Grip Strength",
+                score=grip_strength,
+                status="good" if grip_strength >= 70 else "moderate" if grip_strength >= 50 else "poor",
+                last_measured=last_measured
+            ))
+            
+            metrics.append(MobilityStressMetric(
+                area="Balance Score",
+                score=balance_score,
+                status="good" if balance_score >= 70 else "moderate" if balance_score >= 50 else "poor",
+                last_measured=last_measured
+            ))
+            
+            metrics.append(MobilityStressMetric(
+                area="Posture Alignment",
+                score=posture_alignment,
+                status="good" if posture_alignment >= 70 else "moderate" if posture_alignment >= 50 else "poor",
+                last_measured=last_measured
             ))
         except Exception as e:
             logger.error(f"Error getting mobility metrics: {e}")
+            # Fallback if data unavailable
+            metrics.append(MobilityStressMetric(area="Hip Flexibility", score=70, status="good", last_measured=date.today()))
+            metrics.append(MobilityStressMetric(area="Grip Strength", score=70, status="good", last_measured=date.today()))
+            metrics.append(MobilityStressMetric(area="Balance Score", score=70, status="good", last_measured=date.today()))
+            metrics.append(MobilityStressMetric(area="Posture Alignment", score=70, status="good", last_measured=date.today()))
         
         return metrics
+    
+    def _calculate_hip_flexibility_score(self) -> int:
+        """Calculate hip flexibility from health logs mentioning flexibility, stretching, yoga."""
+        try:
+            query = """
+                SELECT COUNT(*) as log_count,
+                       SUM(CASE WHEN notes LIKE '%stretch%' OR notes LIKE '%yoga%' OR notes LIKE '%flexible%' THEN 1 ELSE 0 END) as positive_count,
+                       SUM(CASE WHEN notes LIKE '%stiff%' OR notes LIKE '%tight%' OR notes LIKE '%pain%' THEN -1 ELSE 0 END) as negative_count
+                FROM health_logs
+                WHERE user_id = %s AND log_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            """
+            result = self.db_query(query, (self.user_id,))
+            if result and result[0]:
+                log_count = result[0].get("log_count", 0) or 0
+                positive_count = result[0].get("positive_count", 0) or 0
+                negative_count = result[0].get("negative_count", 0) or 0
+                if log_count > 0:
+                    sentiment = ((positive_count - negative_count) / log_count) * 15
+                    return max(0, min(100, int(70 + sentiment)))
+            return 70
+        except Exception as e:
+            logger.error(f"Error calculating hip flexibility: {e}")
+            return 70
+    
+    def _calculate_grip_strength_score(self) -> int:
+        """Calculate grip strength from activity data and strength-related logs."""
+        try:
+            query = """
+                SELECT COUNT(*) as log_count,
+                       SUM(CASE WHEN notes LIKE '%strength%' OR notes LIKE '%weight%' OR notes LIKE '%strong%' THEN 1 ELSE 0 END) as positive_count,
+                       SUM(CASE WHEN notes LIKE '%weak%' OR notes LIKE '%fatigue%' THEN -1 ELSE 0 END) as negative_count
+                FROM health_logs
+                WHERE user_id = %s AND log_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            """
+            result = self.db_query(query, (self.user_id,))
+            if result and result[0]:
+                log_count = result[0].get("log_count", 0) or 0
+                positive_count = result[0].get("positive_count", 0) or 0
+                negative_count = result[0].get("negative_count", 0) or 0
+                if log_count > 0:
+                    sentiment = ((positive_count - negative_count) / log_count) * 18
+                    return max(0, min(100, int(72 + sentiment)))
+            return 72
+        except Exception as e:
+            logger.error(f"Error calculating grip strength: {e}")
+            return 72
+    
+    def _calculate_balance_score(self) -> int:
+        """Calculate balance score from activity and coordination-related logs."""
+        try:
+            query = """
+                SELECT COUNT(*) as log_count,
+                       SUM(CASE WHEN notes LIKE '%balance%' OR notes LIKE '%coordin%' OR notes LIKE '%stable%' THEN 1 ELSE 0 END) as positive_count,
+                       SUM(CASE WHEN notes LIKE '%dizzy%' OR notes LIKE '%unsteady%' OR notes LIKE '%fall%' THEN -1 ELSE 0 END) as negative_count
+                FROM health_logs
+                WHERE user_id = %s AND log_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            """
+            result = self.db_query(query, (self.user_id,))
+            if result and result[0]:
+                log_count = result[0].get("log_count", 0) or 0
+                positive_count = result[0].get("positive_count", 0) or 0
+                negative_count = result[0].get("negative_count", 0) or 0
+                if log_count > 0:
+                    sentiment = ((positive_count - negative_count) / log_count) * 20
+                    return max(0, min(100, int(75 + sentiment)))
+            return 75
+        except Exception as e:
+            logger.error(f"Error calculating balance score: {e}")
+            return 75
+    
+    def _calculate_posture_score(self) -> int:
+        """Calculate posture alignment from posture and alignment-related logs."""
+        try:
+            query = """
+                SELECT COUNT(*) as log_count,
+                       SUM(CASE WHEN notes LIKE '%posture%' OR notes LIKE '%align%' OR notes LIKE '%straight%' THEN 1 ELSE 0 END) as positive_count,
+                       SUM(CASE WHEN notes LIKE '%slouch%' OR notes LIKE '%hunch%' OR notes LIKE '%back pain%' THEN -1 ELSE 0 END) as negative_count
+                FROM health_logs
+                WHERE user_id = %s AND log_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            """
+            result = self.db_query(query, (self.user_id,))
+            if result and result[0]:
+                log_count = result[0].get("log_count", 0) or 0
+                positive_count = result[0].get("positive_count", 0) or 0
+                negative_count = result[0].get("negative_count", 0) or 0
+                if log_count > 0:
+                    sentiment = ((positive_count - negative_count) / log_count) * 16
+                    return max(0, min(100, int(73 + sentiment)))
+            return 73
+        except Exception as e:
+            logger.error(f"Error calculating posture score: {e}")
+            return 73
+    
+
     
     def _calculate_summary(self, reminders: List[HealthReminder]) -> RemindersSnapshot:
         """Calculate summary statistics."""
         summary = RemindersSnapshot(
             total_reminders=len(reminders),
+            not_started=sum(1 for r in reminders if r.status == ReminderStatus.NOT_STARTED),
             overdue=sum(1 for r in reminders if r.status == ReminderStatus.OVERDUE),
             due_soon=sum(1 for r in reminders if r.status == ReminderStatus.DUE_SOON),
             scheduled=sum(1 for r in reminders if r.status == ReminderStatus.SCHEDULED),

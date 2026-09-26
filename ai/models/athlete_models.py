@@ -50,7 +50,7 @@ class FatigueAlert(BaseModel):
     """Individual fatigue alert."""
     type: str = Field(..., description="overtraining_risk | recovery_deficit | cumulative_fatigue | sleep_debt")
     level: str = Field(..., description="low | moderate | high")
-    message: str
+    message: str = Field(default="", description="Optional alert message (empty for compact format)")
 
 
 class CycleInfo(BaseModel):
@@ -92,3 +92,34 @@ class AthleteReadinessResponse(BaseModel):
 class AthleteReadinessRequest(BaseModel):
     """Request for athlete readiness."""
     user_id: int = Field(..., ge=1, description="User ID")
+
+class CycleTrainingFocus(BaseModel):
+    """Compact training focus recommendations for specific menstrual cycle phase."""
+    cycle_phase: str = Field(..., description="menstrual | follicular | ovulation | luteal")
+    phase_day: str = Field(..., description="Current cycle day (e.g., 'D14')")
+    focus: str = Field(..., description="Training focus in 3-5 words")
+    recommendations: list[str] = Field(..., description="4-5 actionable recommendations, max 8 words each")
+
+
+class UnifiedAthletePerformance(BaseModel):
+    """Unified Athlete Performance API combining readiness score and cycle-based training."""
+    # Readiness data
+    date: str = Field(..., description="ISO date of assessment")
+    readiness_score: int = Field(..., ge=0, le=100, description="Overall readiness 0-100")
+    readiness_level: str = Field(..., description="Peak Ready | Ready | Adequate | Fatigued | Depleted")
+    
+    # Quick metrics
+    hrv: HRVMetric = Field(..., description="Heart rate variability")
+    recovery: RecoveryMetric = Field(..., description="Recovery status")
+    training_load: TrainingLoadMetric = Field(..., description="Training load")
+    
+    # Full metrics
+    metrics: Metrics
+    fatigue_alerts: list[FatigueAlert]
+    cycle_info: CycleInfo
+    recommendations: PhaseRecommendation
+    
+    # Cycle-based training data
+    training_focus: CycleTrainingFocus = Field(..., description="Cycle-phase specific training recommendations")
+    
+    next_update: str = Field(..., description="ISO timestamp of next scheduled update")
