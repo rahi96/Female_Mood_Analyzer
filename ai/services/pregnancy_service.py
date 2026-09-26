@@ -13,6 +13,33 @@ from ai.models.pregnancy_models import (
 
 
 # ============================================================================
+# VALIDATION HELPER FUNCTIONS
+# ============================================================================
+
+def _validate_pregnancy_start_date(pregnancy_start: date, user_id: int) -> None:
+    """
+    Validate that pregnancy start date is not in the future.
+    
+    Args:
+        pregnancy_start: The pregnancy start date to validate
+        user_id: User ID for error messages
+        
+    Raises:
+        HTTPException: 400 Bad Request if date is in the future
+    """
+    if isinstance(pregnancy_start, str):
+        pregnancy_start = datetime.strptime(pregnancy_start, "%Y-%m-%d").date()
+    
+    current_date = date.today()
+    if pregnancy_start > current_date:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid pregnancy start date: {pregnancy_start} is in the future. "
+                   f"Pregnancy cannot start in the future (today is {current_date})."
+        )
+
+
+# ============================================================================
 # PREGNANCY MILESTONES DATA - UI-ALIGNED NARRATIVE FORMAT
 # ============================================================================
 
@@ -166,6 +193,10 @@ def pregnancy_summary(user_id: int) -> Dict[str, Any]:
             
             # Calculate pregnancy week
             pregnancy_start = cycle.get("period_start_date")
+            
+            # VALIDATION: Check if pregnancy start date is in the future
+            _validate_pregnancy_start_date(pregnancy_start, user_id)
+            
             current_date = date.today()
             current_week = (current_date - pregnancy_start).days // 7
             

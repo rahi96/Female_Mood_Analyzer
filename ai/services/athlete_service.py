@@ -1220,17 +1220,17 @@ def _generate_compact_phase_recommendations_with_claude(context: str) -> dict[st
         }
 
 
-def get_unified_athlete_performance(user_id: int, cycle_phase: str) -> dict[str, Any]:
+def get_unified_athlete_performance(user_id: int) -> dict[str, Any]:
     """
-    Get unified athlete performance combining readiness score and cycle training focus.
-    LLM generates phase-specific insights based on readiness metrics.
+    Get unified athlete performance with all 4 cycle phase cards.
+    Returns readiness score + cards for Menstrual, Follicular, Ovulation, Luteal phases.
+    No cycle_phase parameter needed - all phases displayed in UI.
     
     Args:
         user_id: The user's ID
-        cycle_phase: menstrual | follicular | ovulation | luteal
     
     Returns:
-        Dictionary with readiness data + cycle training focus combined
+        Dictionary with readiness data + 4 phase cards for UI
     """
     from fastapi import HTTPException
     
@@ -1243,29 +1243,33 @@ def get_unified_athlete_performance(user_id: int, cycle_phase: str) -> dict[str,
         # Get readiness data (includes actual cycle info from database)
         readiness_data = athlete_readiness(user_id)
         if isinstance(readiness_data, dict) and "status" in readiness_data:
-            # Readiness failed, propagate error
-            raise HTTPException(
-                status_code=500, 
-                detail="Failed to calculate readiness score"
-            )
+            raise HTTPException(status_code=500, detail="Failed to calculate readiness score")
         
-        # Get cycle training focus using provided phase
-        cycle_training = get_cycle_training_focus(user_id, cycle_phase)
-        if isinstance(cycle_training, dict) and "status" in cycle_training:
-            # Cycle training failed, propagate error
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to generate cycle training recommendations"
-            )
+        # Build 4 phase cards by getting training focus for each phase
+        phases = ["menstrual", "follicular", "ovulation", "luteal"]
+        phase_cards = []
         
-        # Combine readiness data with cycle training focus
+        for phase in phases:
+            cycle_training = get_cycle_training_focus(user_id, phase)
+            if isinstance(cycle_training, dict) and "status" in cycle_training:
+                continue  # Skip if this phase fails, try next
+            
+            phase_card = {
+                "phase": phase,
+                "phase_day": cycle_training.get("phase_day", ""),
+                "focus": cycle_training.get("focus", ""),
+                "recommendations": cycle_training.get("recommendations", []),
+            }
+            phase_cards.append(phase_card)
+        
+        # Build unified response with current readiness + 4 phase cards
         unified_response = {
-            # Readiness info
+            # Readiness info (current day)
             "date": readiness_data.get("date"),
             "readiness_score": readiness_data.get("readiness_score"),
             "readiness_level": readiness_data.get("readiness_level"),
             
-            # Quick metrics (for UI cards)
+            # Quick metrics for display
             "hrv": readiness_data.get("hrv"),
             "recovery": readiness_data.get("recovery"),
             "training_load": readiness_data.get("training_load"),
@@ -1275,13 +1279,8 @@ def get_unified_athlete_performance(user_id: int, cycle_phase: str) -> dict[str,
             "fatigue_alerts": readiness_data.get("fatigue_alerts", []),
             "cycle_info": readiness_data.get("cycle_info"),
             
-            # Cycle training focus (LLM generates based on readiness + phase)
-            "training_focus": {
-                "cycle_phase": cycle_training.get("cycle_phase"),
-                "phase_day": cycle_training.get("phase_day"),
-                "focus": cycle_training.get("focus"),
-                "recommendations": cycle_training.get("recommendations", []),
-            },
+            # All 4 phase cards for UI buttons
+            "phase_cards": phase_cards,
             
             "next_update": readiness_data.get("next_update"),
         }

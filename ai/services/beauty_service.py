@@ -11,27 +11,17 @@ from ai.utils.claude_llm import ClaudeLLM
 from ai.utils.db import get_connection
 
 
-BEAUTY_SYSTEM_PROMPT = """You are an expert beauty & skincare AI assistant for a women's wellness app.
+BEAUTY_SYSTEM_PROMPT = """You are a beauty & skincare AI assistant for a women's wellness app.
 
-ANALYSIS REQUIREMENTS:
-- Analyze provided skin metrics (7 scores: overall, hydration, redness, texture, glow, pore health, elasticity)
-- Consider menstrual cycle phase impact on skin
-- Analyze activity/sleep correlation with skin health
-- Provide personalized skincare recommendations
-
-RESPONSE FORMAT:
-Return ONLY valid JSON with:
+RESPONSE FORMAT - Return ONLY valid JSON:
 {
-    "overall_assessment": "string - 2-3 sentence summary of current skin health",
-    "phase_impact": "string - how current menstrual phase affects skin",
-    "sleep_correlation": "string - how sleep impacts skin",
-    "key_focus_areas": ["array", "of", "problem", "areas"],
-    "recommendations": ["array", "of", "actionable", "skincare", "tips"],
-    "routine_suggestion": "string - brief morning/evening routine",
-    "confidence_score": 85
+    "overall_assessment": "1-2 sentence summary of skin health",
+    "key_focus_areas": ["area1", "area2", "area3"],
+    "recommendations": ["tip1", "tip2", "tip3"],
+    "confidence_score": 75
 }
 
-CRITICAL: Return ONLY JSON, no markdown or additional text."""
+CRITICAL: JSON only, no markdown."""
 
 
 # Helper functions for score mapping and enhancements
@@ -477,24 +467,6 @@ def get_beauty_overview(request: BeautyRequest) -> BeautyResponse:
             # No scan data - provide helpful default message
             today_skin['neumera_insight'] = "Complete your first skin scan to get personalized insights and recommendations."
         
-        # Check if user has any data - if not, return early with null insights
-        has_data = bool(today_skin and today_skin.get('overall_score')) or bool(history_skin)
-        
-        # Only generate Claude insights if user has scan data
-        if has_data:
-            # Build context for Claude
-            context = _build_beauty_context(
-                today_skin=today_skin,
-                history_skin=history_skin,
-                activity_data=activity_data,
-                cycle_data=cycle_data
-            )
-            # Get Claude insights
-            ai_insights = _generate_beauty_insights(context)
-        else:
-            # No data - return None insights
-            ai_insights = None
-        
         # Format history for UI display
         formatted_history = _format_history_for_ui(history_skin)
         
@@ -573,8 +545,7 @@ def get_beauty_overview(request: BeautyRequest) -> BeautyResponse:
                     best_phase="ovulation",
                     worst_phase="menstrual"
                 )
-            ),
-            ai_insights=ai_insights
+            )
         )
     
     except Exception as exc:
@@ -927,11 +898,8 @@ def _generate_beauty_insights(context: str) -> AIInsights:
         print(f"Error generating beauty insights: {exc}")
         return AIInsights(
             overall_assessment="Unable to generate insights at this time",
-            phase_impact="",
-            sleep_correlation="",
             key_focus_areas=[],
             recommendations=[],
-            routine_suggestion="",
             confidence_score=0
         )
 
