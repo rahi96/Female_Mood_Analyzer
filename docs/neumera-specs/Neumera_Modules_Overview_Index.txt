@@ -1,0 +1,75 @@
+﻿NEUMERA
+Longitudinal women’s health & AI coaching
+Life-Stage Modules — Platform Overview & Index
+Shared architecture, the six modules, and the consolidated compliance register
+For dev-team and compliance review
+
+What this document is. Neumera’s product is organized around six life-stage modules, each specified in its own diligence-grade document. This overview is the front-matter index that ties them together: the shared platform architecture, the one-coach-six-overlays model, the authoritative data-privacy and zero-retention posture that every module inherits, and a consolidated compliance register of the items routed to counsel before launch.
+1 · The six modules at a glance
+Each module is a purpose-built engine over the shared stack and the shared longitudinal record. The set forms one platform, not six apps.
+Module
+Engine
+Role in the platform
+Cycle & Fertility
+Cycle Engine
+The keystone. Canonical reproductive-timeline service; exposes the internal contract (cycle day, phase, ovulation, fertile window) the other engines read.
+Athlete
+Athlete Signal Engine
+N-of-1 readiness from training load, HRV, recovery; consumes cycle phase for its training overlay.
+Perimenopause / Menopause & Vitality
+Vitality Engine
+Symptom-correlation engine (hot flashes, sleep, mood) plus staging; consumes cycle-gap data.
+Pregnancy & Postpartum
+Two-mode engine
+Pregnancy and postpartum modes with a hard pivot at birth; triage-defining; consumes cycle data for dating.
+Lifelong Thriving
+Longitudinal Thriving Engine
+Multi-year trajectory; inherits data from every prior life-stage engine.
+Beauty & Radiance
+Radiance Engine
+The entry wedge and downstream face; reads inner signals from every engine and reflects them outward.
+2 · Shared platform architecture
+One stack
+Every module runs on the same confirmed stack: a Laravel API core, an internal Python/FastAPI ML microservice (async boundary, Python internal-only) for the modelling and correlation math, and a Flutter client. Ingestion is via Apple HealthKit and Android Health Connect (the Flutter health plugin) and the Terra API for cloud wearables, with graceful enrichment so each module works on manual input alone and sharpens with more signal. AI inference runs on AWS Bedrock.
+Upstream keystone, downstream face
+The engines are not peers on a flat database. Cycle & Fertility is the upstream keystone — it owns the internal reproductive-timeline contract that Athlete (phase), Menopause (cycle-gap staging), and Pregnancy (dating) consume. Beauty & Radiance is the downstream face — it reads inner signals from across the platform and reflects them outward. Lifelong Thriving sits at the end of the arc, inheriting data from every prior engine. This is what makes “one longitudinal record” real.
+One coach, six overlays
+There is a single platform AI coach, not six. Per the coach patent it uses layered base-prompt-plus-life-stage-overlay orchestration — one engine, six overlays that swap by stage (and, in Pregnancy, by mode; in Cycle, by intent door). It runs on Bedrock, is cost-routed across model tiers, is metered by subscription tier, and treats automated daily summaries as off-quota while user-initiated coaching counts against the cap. Every overlay is retrieval-grounded in the EVP clinical-programs corpus rather than free-generating medical content, and each carries module-specific guardrails and escalation paths.
+One design ethic
+A consistent honest-science posture runs through all six: personalized-and-humble over precise-and-wrong (N-of-1 patterns against the user’s own baseline, ranges with confidence over false certainty), inform-and-route rather than diagnose, and copy that stays on the wellness side of every medical line.
+3 · Data Privacy & Zero-Retention (authoritative)
+Privacy is a first-class design principle, not a compliance afterthought. This section is the authoritative statement of the platform posture. Each module document restates a summary of it as its own Section 0, so every module stands alone for diligence; where they differ is only in naming the highest-sensitivity data that module holds.
+Zero-retention AI
+The AI keeps nothing; your account does. All AI inference runs on AWS Bedrock over private connectivity (VPC PrivateLink), under a signed Business Associate Agreement verified through AWS Artifact, with no retention of prompts or outputs by the model or the provider. The inference layer is stateless; durable value lives only in the user’s own longitudinal record. Zero-retention inference is thereby reconciled with durable longitudinal storage — the record persists, the AI does not. A Control Ownership Matrix documents which controls sit with Neumera versus AWS.
+Three trust domains and the fail-closed gate
+Data is separated into three trust domains with an isolated linkage store, so identity and health signal are never co-resident where the AI can see both. A fail-closed de-identification gate sits on any payload crossing from the identity zone to Bedrock: if it cannot strip identity, the request does not proceed. The gate, the linkage store, and the domain boundaries are backed by a LINDDUN threat model and a Regulatory Control Matrix.
+The pseudonymization precision (diligence-critical)
+The platform’s privacy claims currently rest on pseudonymized status — deliberately not “de-identified” or “anonymized” — pending completion of the HIPAA §164.514(b)(1) Expert Determination scoping the AI-bound payload (with its companion Privacy-Claims Matrix). All documentation and UI copy must use “pseudonymized” until that determination completes; overclaiming here is a diligence and regulatory risk.
+Regulatory posture and the commercial boundary
+The FTC Health Breach Notification Rule is the primary regime at launch (no covered-entity or business-associate relationship, no EU/UK presence at launch); HIPAA Security Rule practices, Washington’s My Health My Data Act, and GDPR readiness are maintained as the footprint expands, backed by an incident-response plan with breach-notification steps. The B2B provider-advertising layer targets geography and life-stage context only — never individual health signals; no module’s health data is used for ad targeting.
+4 · Consolidated compliance & counsel register
+The items below are routed to regulatory/privacy counsel before launch. In each case the mitigation is design discipline, not weakening the feature; and in each case only the named feature (not the whole module) gates launch on the review.
+Area
+Flag
+Status
+Pregnancy & Postpartum
+Symptom-triage / red-flag escalation and EPDS postpartum screening may fall within the FDA’s Software-as-a-Medical-Device (SaMD) definition.
+Counsel review; these two features gate launch.
+Lifelong Thriving
+Cognitive wellness monitoring and preventative health signals may approach the SaMD boundary depending on implementation.
+Counsel review; these two features gate launch.
+Cycle & Fertility
+The avoiding-pregnancy door approaches SaMD — fertile-window prediction for pregnancy prevention is the exact function Natural Cycles was FDA-cleared for; Neumera is not cleared.
+Counsel review; this door gates launch. Highest-sensitivity privacy tier for intent-door data.
+Beauty & Radiance
+Facial biometric data (Illinois BIPA and similar); plus body-image safety and the not-dermatology boundary.
+Counsel review of biometric handling; body-image and derm route-to-care are launch requirements.
+Platform-wide
+HIPAA §164.514(b)(1) Expert Determination pending; privacy claims rest on “pseudonymized” until it completes.
+Complete the determination; hold “pseudonymized” language meanwhile.
+
+Modules without a module-specific SaMD flag. Athlete and Perimenopause/Menopause carry no SaMD flag of their own and inherit the platform privacy posture in full. Menopause’s low-mood escalation path is handled as a mental-health-adjacent signal; Beauty is the lowest medical-risk module but the highest on biometric-privacy and body-image grounds.
+5 · Build sequencing note
+Because the engines share the reproductive-timeline contract, Cycle & Fertility is the natural first build — Athlete’s phase overlay, Menopause’s staging, and Pregnancy’s dating all read from it, so specifying it first locks down the shared foundation. Beauty & Radiance, as the entry wedge and the lowest-risk module, is a natural early consumer-facing surface, though its Perfect Corp facial-biometric handling must clear counsel first. Lifelong Thriving is best built last, since it inherits from every other engine.
+Companion documents. This overview sits alongside the six module specifications (Athlete, Perimenopause/Menopause & Vitality, Pregnancy & Postpartum, Lifelong Thriving, Cycle & Fertility, and Beauty & Radiance), each of which carries its own Section 0 privacy summary, screen exhibits, and Cowork build prompt.
+

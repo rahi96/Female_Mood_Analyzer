@@ -1,0 +1,112 @@
+﻿NEUMERA
+Longitudinal women’s health & AI coaching
+Athlete Module — Signal Engine Specification
+Functional architecture, screen layout, and feature build notes
+For dev-team and compliance review
+
+Purpose of this document. This spec describes the Athlete life-stage module as a single signal engine with five read-surfaces, the cycle-phase logic that drives its daily recommendation, two reference screen layouts (the “Today” hero view and the fired fatigue-alert state), and a ready-to-run Cowork prompt for producing the full diligence-grade specification. Screens shown are design references for the build team, not final production assets.
+0 · Data Privacy & Zero-Retention
+Privacy is a first-class design principle across every Neumera module, not a compliance afterthought. The commitments below are inherited from Neumera’s core platform and privacy architecture and restated here so this document stands on its own for diligence review. They govern every feature in this specification.
+Zero-retention AI
+The AI keeps nothing; your account does. All AI inference runs on AWS Bedrock over private connectivity (VPC PrivateLink), under a signed Business Associate Agreement verified through AWS Artifact, with no retention of prompts or outputs by the model or the provider. The inference layer is stateless; durable value lives only in the user’s own longitudinal record. This is how zero-retention inference is reconciled with durable longitudinal storage — the record persists, the AI does not.
+Trust domains and the de-identification gate
+Data is separated into three trust domains with an isolated linkage store, so identity and health signal are never co-resident where the AI can see both. A fail-closed de-identification gate sits on any payload crossing from the identity zone to Bedrock: if the gate cannot strip identity, the request does not proceed.
+Precision note. The platform’s privacy claims currently rest on pseudonymized status — not “de-identified” or “anonymized” — pending completion of the HIPAA §164.514(b)(1) Expert Determination scoping the AI-bound payload. Documentation and UI copy should use “pseudonymized” until that determination completes.
+Regulatory posture
+The FTC Health Breach Notification Rule is the primary regime at launch (no covered-entity or business-associate relationship, and no EU/UK presence at launch); HIPAA Security Rule practices, Washington’s My Health My Data Act, and GDPR readiness are maintained as the footprint expands, backed by an incident-response plan with breach-notification steps.
+Commercial data boundary
+The B2B provider-advertising layer targets geography and life-stage context only — never individual health signals. No module’s health data is used for ad targeting.
+Highest-sensitivity data in this module
+Training load, HRV, resting-heart-rate, sleep, and recovery patterns — including where they are correlated against cycle phase read from the Cycle engine. These are handled under the zero-retention and trust-domain controls above, against the user’s own rolling baseline rather than any shared profile.
+1 · Architecture — the Athlete Signal Engine
+These are not five features. They are one signal pipeline with five surfaces. Briefed as five separate features, the team will build five disconnected widgets that each recompute the same inputs. Build it as a single Athlete Signal Engine with five read-views on top.
+How the pipeline flows
+HRV, resting HR, and sleep are inputs. Recovery analysis is a composite score derived from them. Training load is its own track (workout data + session RPE). Fatigue detection is not a sixth input — it is an alerting layer that fires when load is high and recovery/HRV are suppressed. Cycle-based training plans are an overlay that reads phase from the existing Cycle & Fertility engine and modulates what the other four produce. The real architecture: ingest → derive → overlay cycle phase → recommend + alert.
+Feature-to-stack mapping
+Confirmed stack: Laravel API core + Python/FastAPI internal ML microservice (async boundary, Python internal-only) + Flutter client. Ingestion via HealthKit / Health Connect (Flutter health plugin) and Terra API for cloud wearables.
+Training load — Ingest workouts (type, duration, HR stream) via Terra + HealthKit/Health Connect; log session RPE manually (Flutter → Laravel). Compute ACWR and CTL/ATL trend in FastAPI. Deterministic sports-science math — keep as clean functions, not a model.
+HRV tracking — Pull nightly/morning rMSSD via Terra (Whoop, Oura, Garmin) and HealthKit where available. Store the raw series in the durable record; compute a rolling 60-day baseline with a normal band in FastAPI. HRV is device-dependent and non-comparable across devices — baseline per-device.
+Recovery analysis — A weighted composite of HRV deviation, resting-HR deviation, sleep duration/quality, and a one-tap subjective check-in. Start with a transparent weighted formula (explainable, debuggable, no training data) before reaching for a learned model. A black-box score you can’t explain is a liability in a health product.
+Fatigue detection — A rules layer first: fire when ACWR breaches the high band and HRV/recovery sit below baseline for N consecutive days. Bedrock adds interpretation (“load has climbed three weeks running while recovery trended down — consider a deload”), keeping nothing, per the zero-retention pattern. A learned model comes later, once longitudinal data exists.
+Cycle-based training plans — The overlay reads phase from the Cycle engine and adjusts emphasis (higher-intensity tolerance in follicular, recovery-weighted in late luteal).
+One thing to settle before building
+The cycle-based training feature is the differentiator and the biggest scientific-claim risk. Evidence for prescriptive, universal menstrual-phase periodization is genuinely mixed — studies are small and heterogeneous, and several recent reviews conclude individual variation swamps any population-level phase effect. Shipping hard claims like “train heavy in your follicular phase” overstates the science and is exactly what damages trust. The defensible framing — and the better product — is personalized pattern detection: “we track how you actually perform and recover across your cycle, and surface your patterns.” An N-of-1 model, not a prescriptive one. Bake that into the spec, not a disclaimer bolted on later.
+
+2 · Cycle-phase training-emphasis logic
+Framing for the spec: this is the engine’s starting heuristic, not its verdict. These are population-level tendencies with high individual variation. The engine begins here on day one (before it has her data) and then overrides these defaults with her own observed patterns as the N-of-1 record fills in. The table is the prior; her data is the posterior.
+Phase
+Approx. days
+Hormonal backdrop
+Default training emphasis
+What the engine personalizes / flags
+Menstrual
+1–5
+Estrogen & progesterone low
+Train as tolerated; symptom-led. Many perform normally — don’t auto-suppress
+Reads logged symptoms (cramps, flow, energy); learns whether she runs low or fine here
+Follicular
+6–13
+Estrogen rising
+Build window — favor higher intensity, strength, progressive load
+Confirms whether her recovery / HRV actually run higher here before leaning in
+Ovulation
+~14
+Estrogen peak, LH surge
+Strength may peak — good for PRs. Injury-risk flag
+Surfaces the ligament-laxity / ACL-risk caution on high-risk movements — a gentle nudge, not an alarm
+Early–mid luteal
+15–22
+Progesterone rising, core temp up
+Steady aerobic, technique, moderate load; heat tolerance may drop
+Watches for her heat / endurance dip; adjusts only if her data shows it
+Late luteal
+23–28
+Hormones falling, PMS window
+Recovery-weighted; deload-friendly; lower intensity if symptomatic
+Learns whether she actually needs the deload or trains through it fine
+
+Design instruction: once she has data, the surfaced recommendation should name the personalization — “Your last three cycles, you’ve recovered faster in this phase” beats “It’s your follicular phase, train hard.” The first is an N-of-1 observation you can defend; the second is a contested population claim.
+
+3 · Screen layout — the “Today” hero
+The screen a woman lands on when she opens the Athlete module. Deliberately one number, one badge, one sentence — everything else is a tap away.
+
+Figure 1 — Athlete module “Today” hero view (design reference).
+Build notes
+Recovery is the hero, not a card. The readiness score (0–100) up top is the recovery surface; it answers “how hard can I go today?” before she has to think. The four cards are the entry points to the other surfaces.
+The recommendation line is Bedrock’s job. It reads “your last 3 cycles, you’ve recovered fastest in this phase” — the N-of-1 framing, not a generic “it’s your follicular phase” claim.
+Always her own baseline. Every delta (+6 ms HRV, ACWR 1.08) renders against her rolling baseline, never population norms — correct for the science and consistent with the “you’re not a number on a chart” ethos.
+Default vs. observed copy. The “build window / strength emphasis” label is the default heuristic until her data overrides it; the copy softens to “you tend to build well here” once the record has enough cycles.
+
+4 · Fatigue detection — the fired alert state
+Same slot on the screen as the Fatigue card, but this is the state that justifies the feature existing. Build this alongside the calm “all clear” state.
+
+Figure 2 — Fatigue alert, fired state (design reference).
+Build notes
+The alert shows its work. It names the two conditions that fired it (load 1.47 high, HRV suppressed 4 days) rather than flashing a bare warning. That transparency is what makes it trustworthy instead of alarming, and lets her overrule it if she knows something the engine doesn’t.
+Persistence, not a blip. The “Day 4” marker signals the rule needs the condition sustained — a one-day dip does not fire it.
+The coach line contextualizes against her cycle. “This isn’t your usual late-luteal dip — it’s mid-cycle” is the difference between a threshold alarm and interpretation. The Bedrock layer reads her record, speaks, and forgets — zero-retention.
+The disclaimer is load-bearing. “Informational wellness insight, not a medical diagnosis of overtraining syndrome.” Overtraining syndrome is a real clinical diagnosis; the copy must stay on the wellness side of that line — same discipline as the Avoiding-Pregnancy mode.
+
+5 · Cowork build prompt (consolidated)
+Drop this into Cowork to produce the full diligence-grade Athlete module specification. The phase table and both screens above are referenced as Exhibits A–C.
+Task
+Produce a diligence-grade functional and technical specification document for the Athlete life-stage module of the Neumera women’s health app, for our contract dev team and compliance reviewers. Match our established document system: navy and Sand Gold brand colors, Fraunces for headlines, Inter for body. First review our existing spec documents (the Cycle/Fertility Section 7 functional spec, the health data ingestion architecture spec, and the graceful-enrichment/wearable-independence doc) so this module is stylistically and architecturally consistent — the Athlete engine must interoperate with the existing Cycle & Fertility engine.
+Architecture
+Specify the module as a single Athlete Signal Engine with five read-surfaces, not five independent features. Pipeline: ingest raw signals → derive metrics → overlay cycle phase → produce recommendations and alerts. The five surfaces are training load monitoring, recovery analysis, HRV tracking, cycle-based training plans, and fatigue detection. Recovery is not a sibling metric — it is the top-line readiness score the whole screen leads with.
+Stack
+Laravel API core, internal Python/FastAPI ML microservice (async Laravel↔Python boundary, Python internal-only), Flutter client. Data sources: Apple HealthKit and Android Health Connect via the Flutter health plugin, Terra API for cloud wearables (Whoop, Oura, Garmin, Fitbit), plus manual session-RPE and subjective-wellness logging. AI coaching interpretation runs on AWS Bedrock under our zero-retention pattern (“the AI keeps nothing; your account does”), with the de-identification gate on any payload crossing to Bedrock.
+Per surface, specify
+Data inputs and sources; the computation, naming the sports-science methods (ACWR, CTL/ATL for load; rMSSD baseline and deviation for HRV; a transparent weighted composite for recovery); where compute lives (deterministic FastAPI functions vs. rules-layer alerting vs. Bedrock interpretation); storage in the durable longitudinal record; and the Flutter UI. Every metric is framed against the user’s own rolling baseline, never population norms.
+Critical science-honesty requirement
+Specify cycle-based training as personalized N-of-1 pattern detection (“we surface how you perform and recover across your cycle”), not prescriptive population-level phase periodization — the evidence is contested and prescriptive claims are a credibility and trust risk. The cycle-phase table (Exhibit A) is the engine’s starting heuristic only; specify that her observed data overrides these defaults, and that recommendation copy shifts from default framing (“you tend to build well here”) to observed framing (“your last 3 cycles, you’ve recovered fastest in this phase”) once the record has enough cycles.
+Fatigue detection
+A rules layer first: fire only when ACWR breaches the high band AND HRV/recovery sit below baseline for a sustained window (specify N days). The alert must show its trigger conditions, not just a warning. Bedrock adds cycle-aware interpretation. Defer any learned fatigue model until longitudinal data exists.
+Compliance section
+Frame recovery scores and fatigue detection as informational wellness features, not medical diagnosis of overtraining syndrome — consistent with our tiered-disclaimer discipline. Recommend a phased build: deterministic math and rules-based alerting first (no training data required), learned models deferred.
+Reference exhibits to include and build against
+Exhibit A — Cycle-phase training-emphasis table (Section 2 of this document).
+Exhibit B — “Today” hero screen (Figure 1): one readiness score (0–100), a cycle-phase badge, one interpretive recommendation line, and four detail cards (Training Load / HRV / Cycle & Training / Fatigue) that tap through to full trend views. Recovery is the hero number, not a card.
+Exhibit C — Fatigue alert, fired state (Figure 2): red-tint card showing the two trigger conditions with values, a cycle-aware coach interpretation, a “see a lighter plan” primary action, and a wellness-not-diagnosis disclaimer.
+
+Practical note. Cowork can’t ingest the two rendered screens as images from the chat directly — either describe Exhibits B and C in the prompt (as done above, enough to reconstruct them in the spec) or attach Figures 1 and 2 from this document to the Cowork session as visual references. The phase table (Exhibit A) can be pasted straight in as text.
+
