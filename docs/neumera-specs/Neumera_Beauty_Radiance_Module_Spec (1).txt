@@ -1,0 +1,105 @@
+﻿NEUMERA
+Longitudinal women’s health & AI coaching
+Beauty & Radiance Module
+The Radiance Engine — functional architecture, screen layouts, and feature build notes
+For dev-team and compliance review
+
+Purpose of this document. This spec describes Beauty & Radiance — the platform’s entry wedge and its outward-facing lens on the same inner signals the other engines track. It covers the module architecture (the outer-reflects-inner thesis and the Radiance Engine), the body-image commitment that is this module’s central design discipline, the Perfect Corp AI-skin-analysis integration as the centerpiece, a proposed feature set, the AI-coach overlay, three reference screen layouts (the “Today” hero, the skin-scan result, and the inner-driver screen), a regulatory/privacy flag for counsel, and a ready-to-run Cowork prompt. Screens shown are design references, not final production assets.
+Stage framing. User-facing, this stage reads: revealing how skin, energy, and outward vitality reflect inner health, turning daily signals into visible results.
+0 · Data Privacy & Zero-Retention
+Privacy is a first-class design principle across every Neumera module, not a compliance afterthought. The commitments below are inherited from Neumera’s core platform and privacy architecture and restated here so this document stands on its own for diligence review. They govern every feature in this specification.
+Zero-retention AI
+The AI keeps nothing; your account does. All AI inference runs on AWS Bedrock over private connectivity (VPC PrivateLink), under a signed Business Associate Agreement verified through AWS Artifact, with no retention of prompts or outputs by the model or the provider. The inference layer is stateless; durable value lives only in the user’s own longitudinal record. This is how zero-retention inference is reconciled with durable longitudinal storage — the record persists, the AI does not.
+Trust domains and the de-identification gate
+Data is separated into three trust domains with an isolated linkage store, so identity and health signal are never co-resident where the AI can see both. A fail-closed de-identification gate sits on any payload crossing from the identity zone to Bedrock: if the gate cannot strip identity, the request does not proceed.
+Precision note. The platform’s privacy claims currently rest on pseudonymized status — not “de-identified” or “anonymized” — pending completion of the HIPAA §164.514(b)(1) Expert Determination scoping the AI-bound payload. Documentation and UI copy should use “pseudonymized” until that determination completes.
+Regulatory posture
+The FTC Health Breach Notification Rule is the primary regime at launch (no covered-entity or business-associate relationship, and no EU/UK presence at launch); HIPAA Security Rule practices, Washington’s My Health My Data Act, and GDPR readiness are maintained as the footprint expands, backed by an incident-response plan with breach-notification steps.
+Commercial data boundary
+The B2B provider-advertising layer targets geography and life-stage context only — never individual health signals. No module’s health data is used for ad targeting.
+Highest-sensitivity data in this module
+Facial biometric data from the Perfect Corp skin scan — among the most legally charged categories (Illinois BIPA and similar state laws). Handled under explicit, specific consent, with on-device processing where the SDK allows, at the highest-sensitivity tier, and never used for ad targeting (see Section 6).
+1 · Architecture — the outward-facing lens
+The thesis that makes this Neumera’s beauty module rather than another skincare app: outer reflects inner. Most beauty apps treat skin as a surface problem to sell product against. Neumera’s angle — straight from the stage description — is that skin, hair, and glow are readouts of sleep, stress, hydration, cycle phase, and nutrition. So this module is the presentation layer: it translates internal health into the visible outcomes people care about day to day, then reveals the inner drivers.
+Structurally it is the mirror image of Cycle & Fertility. Where Cycle is the upstream keystone other engines read from, Beauty is the downstream face that reads from everything (cycle phase, sleep, stress trends). That is exactly why it is the wedge: “why is my skin breaking out / why do I look tired” is a far more immediate hook than “optimize your HRV,” and this module’s job is to convert “I want better skin” into “my skin tracks my sleep and my cycle” — the moment a user understands the whole platform.
+A Radiance Engine whose pipeline is: capture (skin scan + progress photos + self-report) → correlate (against inner signals from the other engines and wearables) → reveal (the inner drivers of outer changes) → guide (modifiable levers and routine).
+The central design discipline — radiance-affirming, never flaw-finding
+This module’s razor’s edge is not medical, it is psychological. A skin-scoring app can easily become an appearance-anxiety engine — pathologizing normal features, ranking against an ideal, feeding body dysmorphia. The design discipline, and the module’s headline commitment: analysis frames skin around health and change-over-time (is it hydrated, is it improving), never around scoring beauty or counting flaws; no comparison to others or to an ideal, no “skin age,” no ranking; and language that never pathologizes normal skin or normal aging. This is a design constraint on every metric and every word — it is what makes the module trustworthy rather than corrosive.
+The Perfect Corp integration — the centerpiece
+The AI skin analysis (selfie → metrics like hydration, texture, evenness, under-eye, radiance) is the marquee feature, the hook, and the surface of the planned Perfect Corp partnership. Two build realities to design around from the start: facial images are biometric data — among the most legally charged categories (Illinois BIPA and its class-action history) — so the integration needs explicit consent, on-device processing where the SDK allows, and handling under the highest-sensitivity privacy tier; and the presentation of scan results is where the body-image discipline lives or dies. The specifics of Perfect Corp’s SDK/API and the exclusivity terms are to confirm directly in the partnership discussions; this spec addresses the integration at the architecture level, not the contract.
+Proposed feature set
+No feature list was specified for this module; the following mirrors the five-feature shape of the others.
+AI skin analysis (Perfect Corp) — the scan and its radiance-affirming metrics.
+Radiance tracking + photo journal — skin metrics and the user’s own progress photos trended over time; the “visible results” promise.
+Inner-driver correlation — the differentiator: skin/glow correlated against sleep, cycle phase, stress, and hydration from the other engines.
+Personalized routine guidance — routine adapted to her skin, cycle phase, and season; evidence-based (sleep, hydration, SPF), never miracle claims, never a serum-shilling engine.
+Holistic radiance signals — hair, nails, energy/glow tied to inner health (nutrition, rest), framed as wellness, not diagnosis.
+Stack and lighter compliance notes
+Confirmed stack: Laravel API core + Python/FastAPI internal ML microservice (for the inner-outer correlation math) + Flutter client (hosting the Perfect Corp SDK). Sources: the Perfect Corp scan, user photos and self-report, and inner signals read from the other engines plus HealthKit/Health Connect and Terra. AI on AWS Bedrock, zero-retention.
+Not dermatology. If the scan or the user surfaces a concerning or changing lesion, the app must not reassure and should route to a dermatologist. Melanoma is the one genuine safety item in an otherwise low-risk module.
+Commercial honesty. This is where product/provider monetization is most tempting and most trust-eroding: recommendations stay genuinely personalized and disclosed, and the B2B provider-ad layer keeps to geography + life-stage only, never individual skin data, per the existing ad-layer rule.
+Efficacy honesty. Radiance guidance is evidence-based (the real levers — sleep, hydration, SPF), honest about skincare’s limits, and free of miracle claims.
+2 · The AI coach — Beauty & Radiance overlay
+The existing platform coach (patent’s layered base-prompt + life-stage-overlay orchestration, Bedrock, zero-retention, cost-routed, tier-metered) with a Beauty & Radiance overlay.
+Radiance-affirming by construction. It never flaw-shames or pathologizes; every response holds the body-image discipline.
+Narrates the inner-outer link. It explains the correlations between skin and sleep, cycle, and stress drawn from the other engines — the wedge conversion.
+Evidence-based and routes to care. Routine and ingredient guidance is retrieval-grounded and honest; anything that looks medical rather than cosmetic routes to a dermatologist.
+3 · Screen layout — the “Today” hero
+The radiance overview, with skin framed as health-and-change and the inner-driver hook front and center.
+
+Figure 1 — Beauty & Radiance “Today” hero view (design reference).
+Build notes
+Metrics are health, not a beauty score. Hydration, Texture, Glow, Under-eye, Hair — framed as health and direction of change (“good ↗,” “smooth,” “rising”), never flaw counts.
+The teal card is the wedge working. “Your glow follows your sleep … dipped during last week’s late-luteal stretch — that’s normal” connects skin to sleep and cycle and normalizes the dip in one sentence.
+Routine is cycle-aware and evidence-based. “SPF + extra hydration · tuned to your skin and your cycle phase” — guidance, not a product to buy.
+4 · Screen layout — the skin-scan result
+The Perfect Corp centerpiece, and where the body-image discipline has to hold on the glass.
+
+Figure 2 — Skin-scan result, Perfect Corp (design reference).
+Build notes
+The affirming frame leads. “Your skin’s health and how it’s changing — not at flaws, and never a score of how you look” is the first thing under the header.
+Change vs. her own last scan, never an ideal. “Better than last scan,” “improving,” “up since rest improved” — no number-out-of-100, no skin age, no comparison to others.
+Calm, not an audit. Green health bars, not a red-flag flaw count.
+The one real safety item. A new or changing mole routes to a dermatologist; Neumera explicitly doesn’t diagnose — the melanoma case handled honestly.
+5 · Screen layout — the inner-driver view
+The differentiator: beauty as a window into inner health, which is the whole wedge.
+
+Figure 3 — Inner-driver correlation view (design reference).
+Build notes
+The thesis made visible. Radiance tracking sleep with a few days’ lag, with the cycle-phase band showing the late-luteal dip as expected — outer-reflects-inner on one chart.
+Wedge conversion and body-image discipline in one line. “Your skin is a window inward … the late-luteal dip is hormonal and expected — not something you did wrong.” It reveals the platform value and refuses to let her blame herself.
+Honest levers, not a product. Sleep, hydration, SPF — the evidence-based levers, not a serum to buy.
+6 · Regulatory & privacy flag — for counsel
+Beauty & Radiance is the lowest medical-risk module, but it carries a distinct and real flag set — lighter than the SaMD modules, centered on biometric privacy and body-image safety.
+⚠  Facial biometric privacy, body-image safety, and the dermatology boundary
+Issue. The Perfect Corp skin scan captures facial biometric data — among the most legally charged categories, with an active class-action history under Illinois’ Biometric Information Privacy Act (BIPA) and similar state laws. It requires explicit, specific consent; on-device processing where the SDK allows; and handling under the highest-sensitivity privacy tier.
+Body-image safety. Appearance scoring can cause real psychological harm (appearance anxiety, body dysmorphia). The radiance-affirming, no-scoring, no-comparison design is not cosmetic polish — it is a first-class safety requirement and should be reviewed as such, especially given a broad female user base.
+Dermatology boundary. Skin analysis is cosmetic wellness, not a medical exam. It must not diagnose skin conditions and must route concerning or changing lesions to a dermatologist (the melanoma case).
+Recommended action. Have regulatory/privacy counsel review the Perfect Corp facial-biometric handling (BIPA/consent posture) and confirm the skin analysis stays framed as cosmetic wellness rather than a device claim, before this module ships. The body-image design discipline and the dermatology route-to-care should be treated as launch requirements, not enhancements.
+7 · Cowork build prompt (consolidated)
+Drop this into Cowork to produce the full diligence-grade Beauty & Radiance module specification. The three screens above are referenced as Exhibits A–C, and the regulatory/privacy flag is carried into the compliance section.
+Task
+Produce a diligence-grade functional and technical specification document for the Beauty & Radiance life-stage module of the Neumera women’s health app, for our contract dev team and compliance reviewers. Match our established document system: navy and Sand Gold brand colors, Fraunces for headlines, Inter for body. First review our existing spec documents (the Athlete, Perimenopause/Menopause, Pregnancy & Postpartum, Lifelong Thriving, and Cycle & Fertility module specs, the health data ingestion architecture spec, the graceful-enrichment doc, the AI coach patent specification, and any notes on the Perfect Corp integration and the B2B provider-ad layer) so this module is stylistically and architecturally consistent.
+Architecture — the outward-facing lens
+Specify Beauty & Radiance as the platform’s entry wedge and its presentation layer: the outward-facing lens on the same inner signals the other engines track (outer reflects inner). Structurally it is the mirror of Cycle & Fertility — where Cycle is the upstream keystone, Beauty is the downstream face that reads from everything (cycle phase, sleep, stress, hydration). Specify a Radiance Engine with the pipeline: capture (skin scan + progress photos + self-report) → correlate (against inner signals from the other engines and wearables) → reveal (the inner drivers of outer changes) → guide (modifiable levers and routine). The module’s job is to convert a beauty-first user into a platform user by revealing that skin tracks sleep and cycle.
+Central design discipline — radiance-affirming, never flaw-finding
+Make this the module’s headline commitment and a design constraint on every metric and word: analysis frames skin around health and change-over-time (hydrated, improving), never scoring beauty or counting flaws; no comparison to others or an ideal, no “skin age,” no ranking; language never pathologizes normal skin or normal aging. This is a first-class safety requirement (appearance anxiety, body dysmorphia), not cosmetic polish.
+Perfect Corp integration — the centerpiece
+Specify the AI skin analysis (selfie → hydration, texture, evenness, under-eye, radiance) as the marquee feature and the Perfect Corp partnership surface. Design around two realities: facial images are biometric data (Illinois BIPA and its class-action history) requiring explicit consent, on-device processing where the SDK allows, and highest-sensitivity-tier handling; and the presentation of results is where the body-image discipline holds or fails. Note that the Perfect Corp SDK/API specifics and exclusivity terms are to be confirmed in the partnership discussions; spec the integration at the architecture level.
+Proposed feature set
+AI skin analysis (Perfect Corp) — the scan and its radiance-affirming metrics. Radiance tracking + photo journal — skin metrics and the user’s own progress photos trended over time. Inner-driver correlation — the differentiator: skin/glow correlated against sleep, cycle phase, stress, hydration from the other engines. Personalized routine guidance — adapted to her skin, cycle phase, and season; evidence-based (sleep, hydration, SPF), never miracle claims, never a serum-shilling engine. Holistic radiance signals — hair, nails, energy/glow tied to inner health, framed as wellness, not diagnosis.
+Stack
+Laravel API core, internal Python/FastAPI ML microservice for the inner-outer correlation math (async boundary, Python internal-only), Flutter client hosting the Perfect Corp SDK. Sources: the Perfect Corp scan, user photos and self-report, and inner signals read from the other engines plus HealthKit/Health Connect and Terra. AI on AWS Bedrock under the zero-retention pattern with the de-identification gate.
+AI coach — Beauty & Radiance overlay
+The existing platform coach with a Beauty & Radiance overlay: radiance-affirming by construction (never flaw-shames or pathologizes), narrates the inner-outer correlations from the other engines (the wedge conversion), gives evidence-based retrieval-grounded routine/ingredient guidance with no miracle claims, and routes anything that looks medical rather than cosmetic to a dermatologist.
+Module-specific requirements
+Body-image safety — the radiance-affirming, no-scoring, no-comparison design is a first-class safety requirement. Facial-biometric privacy — explicit consent, on-device where possible, highest-sensitivity tier, BIPA-aware. Not dermatology — route concerning/changing lesions to a dermatologist; never reassure or diagnose (melanoma case). Commercial honesty — recommendations genuinely personalized and disclosed; the B2B provider-ad layer uses geography + life-stage only, never individual skin data. Efficacy honesty — evidence-based guidance, no miracle claims. Phased build: skin analysis + radiance tracking + inner-driver correlation first; photo journal and provider layer as follow-ons.
+Regulatory & privacy flag to carry into the compliance section
+Flag three items for counsel review before launch: (1) facial-biometric handling under BIPA and similar laws (consent, retention, on-device processing); (2) that the skin analysis stays framed as cosmetic wellness, not a device/diagnostic claim; (3) the body-image design discipline and dermatology route-to-care as launch requirements. Frame mitigations as design discipline, not feature-weakening.
+Reference exhibits to include and build against
+Exhibit A — Beauty & Radiance “Today” hero (Figure 1): skin summarized as health-and-change (hydration/texture/glow with direction, never a beauty score); an inner-driver insight connecting glow to sleep and cycle and normalizing the dip; a cycle-aware, evidence-based routine nudge. Warm glow palette.
+Exhibit B — Skin-scan result, Perfect Corp (Figure 2): an affirming framing note first (“health and how it’s changing — not flaws, never a score of how you look”); metrics shown against the user’s own last scan, no number/age/comparison; calm health bars; a footer routing new/changing moles to a dermatologist and stating Neumera doesn’t diagnose.
+Exhibit C — Inner-driver view (Figure 3): radiance plotted against sleep with a cycle-phase overlay showing the late-luteal dip as expected; a “your skin is a window inward” insight that both converts the wedge and refuses self-blame; the biggest evidence-based levers (sleep, hydration, SPF), not products.
+
+Practical note. Cowork cannot ingest the three rendered screens as images from the chat directly — either describe Exhibits A–C in the prompt (as done above) or attach Figures 1–3 from this document to the Cowork session as visual references.
+

@@ -1,0 +1,104 @@
+﻿NEUMERA
+Longitudinal women’s health & AI coaching
+Lifelong Thriving Module
+Longitudinal Thriving Engine — functional architecture, screen layouts, and feature build notes
+For dev-team and compliance review
+
+Purpose of this document. This spec describes the Lifelong Thriving module as the platform’s longitudinal stage — an engine whose unit of analysis is the multi-year trend, and the one module that inherits data from every prior life stage. It covers the module architecture and per-feature build (with the honest framing required for three claim-risky features), the AI-coach overlay, three reference screen layouts (the “Today” hero, the life-arc view, and the preventative-signals screen), a regulatory flag for counsel, and a ready-to-run Cowork prompt. Screens shown are design references for the build team, not final production assets.
+Stage framing. User-facing, this stage reads: sustaining strength, clarity, and well-being across the years, with intelligence that keeps adapting as you do.
+0 · Data Privacy & Zero-Retention
+Privacy is a first-class design principle across every Neumera module, not a compliance afterthought. The commitments below are inherited from Neumera’s core platform and privacy architecture and restated here so this document stands on its own for diligence review. They govern every feature in this specification.
+Zero-retention AI
+The AI keeps nothing; your account does. All AI inference runs on AWS Bedrock over private connectivity (VPC PrivateLink), under a signed Business Associate Agreement verified through AWS Artifact, with no retention of prompts or outputs by the model or the provider. The inference layer is stateless; durable value lives only in the user’s own longitudinal record. This is how zero-retention inference is reconciled with durable longitudinal storage — the record persists, the AI does not.
+Trust domains and the de-identification gate
+Data is separated into three trust domains with an isolated linkage store, so identity and health signal are never co-resident where the AI can see both. A fail-closed de-identification gate sits on any payload crossing from the identity zone to Bedrock: if the gate cannot strip identity, the request does not proceed.
+Precision note. The platform’s privacy claims currently rest on pseudonymized status — not “de-identified” or “anonymized” — pending completion of the HIPAA §164.514(b)(1) Expert Determination scoping the AI-bound payload. Documentation and UI copy should use “pseudonymized” until that determination completes.
+Regulatory posture
+The FTC Health Breach Notification Rule is the primary regime at launch (no covered-entity or business-associate relationship, and no EU/UK presence at launch); HIPAA Security Rule practices, Washington’s My Health My Data Act, and GDPR readiness are maintained as the footprint expands, backed by an incident-response plan with breach-notification steps.
+Commercial data boundary
+The B2B provider-advertising layer targets geography and life-stage context only — never individual health signals. No module’s health data is used for ad targeting.
+Highest-sensitivity data in this module
+Multi-year health trajectories, cognitive-engagement and preventative-signal data, any user-logged test results, and — uniquely — data inherited from every prior life-stage engine. The breadth of that inherited longitudinal record makes this module’s aggregate profile especially sensitive, and it is held under the same trust-domain and zero-retention controls as the source data.
+1 · Architecture — the longitudinal stage
+Each prior module had a defining shape. Lifelong Thriving’s is different in a way that changes the whole design: it is the longitudinal stage, so its unit of analysis is the trend over years, not the snapshot. Every other module answered “how are you today / this week / this stage?” This one answers “which way are you trending, and is that trajectory good?” Its hero is not a moment — it is a slope.
+It is also the stage that cashes in the platform’s longitudinal-record thesis. This module inherits a woman’s entire Neumera history — her athlete years, her pregnancies, her menopause transition — into one continuous view. No point-solution app can do that; it is the single most honest, defensible differentiator the platform has. “Intelligence that keeps adapting as you do” is literal here: this is the stage that remembers all the others.
+Naming and de-duplication
+Not Athlete’s readiness score. Athlete’s score is daily/acute (“how hard can I train today?”). This module’s vitality score is a multi-year trajectory — a different unit and time horizon.
+Not the Menopause “Vitality Engine.” That engine navigates the transition and its symptoms; this is the long-horizon trajectory across all years. To avoid a naming collision, this engine is the Longitudinal Thriving Engine.
+Engine and pipeline
+A Longitudinal Thriving Engine whose unit is the multi-year trend. Pipeline: aggregate (long-horizon signals across the durable record, including data inherited from prior life-stage engines) → trend (compute trajectories and slopes, not point-in-time values) → contextualize (against the user’s own history and healthy-aging science) → surface (trajectory + modifiable levers + screening reminders + route-to-care flags).
+Three claim-risky features — the honest framing
+Three of the five feature names are the most claim-risky in the platform. Built literally they are both a regulatory and a trust problem; each has a defensible honest version.
+Vitality scoring — not a biological-age claim. A single mystical “vitality number” risks implying a validated biological-age or healthspan measurement it is not. The honest version: a transparent, openable weighted composite shown primarily as a trend (holding / rising / gently declining), every contributing domain visible and separately trended, framed as the user’s own trajectory — never a comparison to other women. It still gives the satisfying hero number without the false-precision liability.
+Cognitive wellness monitoring — the sharpest one. “Monitoring cognition” edges toward dementia/MCI screening, which cannot validly be done through a consumer app; false flags cause enormous anxiety and false reassurance is dangerous. The honest version is cognitive wellness as lifestyle-and-engagement support around the modifiable levers (sleep, activity, social connection, cognitively stimulating habits) — not cognitive testing or decline detection. Any check-ins are engagement/wellness, never diagnostic, with a clear route to professional evaluation if she is concerned.
+Preventative health signals — discuss, not diagnose. Done wrong this is risk-prediction and diagnosis. Done right it is two low-risk, high-value functions: age- and history-appropriate screening reminders (mammogram, DEXA, blood pressure, colonoscopy — “what’s due, worth scheduling”) and pattern-flagging that routes to a conversation (“your resting HR has drifted up — worth mentioning”), framed as discuss-not-diagnose with an “add to visit notes” action. Never risk probability or diagnosis.
+Mobility trends — the safe, strong one. Gait, steps, activity, and strength proxies from wearables, trended over years. Mobility decline is a real healthspan predictor and trending it is fully defensible as encouragement, not diagnosis.
+Healthy-aging insights. Vetted, retrieval-grounded education (EVP lane) on the modifiable levers of healthspan; not personalized medical advice.
+Feature-to-stack mapping
+Confirmed stack: Laravel API core + Python/FastAPI internal ML microservice (async boundary, Python internal-only) + Flutter client. Ingestion via HealthKit / Health Connect (Flutter health plugin) and Terra API for cloud wearables, plus the inherited durable longitudinal record.
+Trend math in FastAPI. Mobility, cardiometabolic proxies, sleep, and activity trends are aggregated over long windows with deterministic trend math (rolling baselines, slope detection) — not a black-box model.
+Vitality composite. A transparent weighted trend of those domains, explainable and openable in the UI.
+Screening reminders. A rules-and-calendar feature keyed to age and history in Laravel.
+Insights and cognitive-engagement content. Retrieval-served from the vetted corpus.
+“Worth discussing” flags. Conservative deterministic rules that route to care — never a diagnostic model. AI interpretation on Bedrock, zero-retention.
+2 · The AI coach — Lifelong Thriving overlay
+As with the other modules, the coach is the existing platform component (patent’s layered base-prompt + life-stage-overlay orchestration, Bedrock, zero-retention, cost-routed, tier-metered), not a new build — here with a Lifelong Thriving overlay.
+Longitudinal narration is its distinctive job. The “what carries forward” insights and trend interpretations are coach-authored automated summaries (off-quota), retrieval-grounded in the healthy-aging corpus.
+Routes, never diagnoses. On preventative-signal flags the coach frames a pattern as worth discussing and routes to care — it never interprets a signal as a diagnosis.
+3 · Screen layout — the “Today” hero
+Built trend-first: the number is subordinate to the slope.
+
+Figure 1 — Lifelong Thriving “Today” hero view (design reference).
+Build notes
+Trend over number. “82, holding, 3 yrs” with a sparkline doing the real work — the slope is the message, not the score.
+The score is transparent and non-competitive. “See what goes into this — it’s yours, not a comparison” makes the composite openable and rules out any comparison to other women.
+Cognitive framing on the glass. The cognitive card reads “Active — habits, not a test,” rendering the entire compliance posture in four words.
+Screening as invitation. “Bone-density scan due this year · worth scheduling” — a reminder, not a warning.
+4 · Screen layout — the life-arc view
+The differentiator screen — why a longitudinal platform beats any point solution.
+
+Figure 2 — Life-arc longitudinal view (design reference).
+Build notes
+One continuous line through her life stages. The trend runs unbroken through athlete years, pregnancies, perimenopause, and now — because Neumera held all of it.
+“What carries forward” is impossible for a point solution. “The strength habits from your athlete years are still paying off” can only be said by an app that was there for the athlete years. It is coach-authored from the durable record.
+The emotional heart of the platform. This screen is the visual argument for longitudinal over fragmented, and it belongs to this stage.
+5 · Screen layout — preventative signals
+The honest version of “preventative health signals”: surface patterns and reminders, route to care, never diagnose.
+
+Figure 3 — “Worth a conversation” preventative screen (design reference).
+Build notes
+The flag is an observation, explicitly hedged. “Drifted up … about 6 beats higher than your usual … may be nothing” — stated as a pattern, not a verdict.
+The action routes to her doctor, not to an interpretation. “Add to my visit notes” sends the signal to her real clinician rather than into an app-generated diagnosis.
+Screening reminders keyed to age and history. Clear states (due / up to date), framed as “worth scheduling.”
+The footer is the feature’s thesis. “Patterns and reminders, not diagnoses. Your doctor has the full picture; Neumera just helps you bring the right things to the conversation.” That sentence keeps the feature on the wellness side of the line.
+6 · Regulatory flag — for counsel
+As with the Pregnancy & Postpartum module, two features here sit near the wellness/medical-device boundary and should be on the diligence record before this module ships.
+⚠  Software-as-a-Medical-Device (SaMD) review required before launch
+Issue. Two features — cognitive wellness monitoring and preventative health signals — can approach the FDA’s Software-as-a-Medical-Device definition depending on how they are implemented. Software that screens for a cognitive condition, or that analyzes signals and drives a health recommendation, sits closer to the regulated boundary than ordinary trend-tracking and education.
+Why it matters here specifically. Cognitive decline and preventative risk are exactly the domains regulators scrutinize hardest. The mitigation is not to weaken the features but to hold the design discipline: engagement-not-testing for cognition (never decline detection), and discuss-not-diagnose for signals (observation, hedge, and route-to-care rather than risk prediction), with auditable rules and provenance throughout.
+Recommended action. Have regulatory/privacy counsel review the cognitive-wellness and preventative-signal features specifically before this module ships, including whether the current framing keeps them within a wellness/CDS exemption. Nothing else in the module should block launch on this basis; these two features should.
+7 · Cowork build prompt (consolidated)
+Drop this into Cowork to produce the full diligence-grade Lifelong Thriving module specification. The three screens above are referenced as Exhibits A–C, and the regulatory flag is carried into the compliance section.
+Task
+Produce a diligence-grade functional and technical specification document for the Lifelong Thriving life-stage module of the Neumera women’s health app, for our contract dev team and compliance reviewers. Match our established document system: navy and Sand Gold brand colors, Fraunces for headlines, Inter for body. First review our existing spec documents (the Athlete, Perimenopause/Menopause, and Pregnancy & Postpartum module specs, the Cycle/Fertility Section 7 functional spec, the health data ingestion architecture spec, the graceful-enrichment doc, and the AI coach patent specification) so this module is stylistically and architecturally consistent — and note that this module uniquely inherits data from all prior life-stage engines.
+Architecture — the longitudinal stage
+Specify the module as a single Longitudinal Thriving Engine whose unit of analysis is the multi-year trend, not the daily snapshot. Pipeline: aggregate (long-horizon signals across the durable record, including data inherited from prior life-stage engines) → trend (trajectories and slopes, not point-in-time values) → contextualize (against the user’s own history and healthy-aging science) → surface (trajectory + modifiable levers + screening reminders + route-to-care flags). The differentiator is that this module cashes in the platform’s longitudinal record — it carries a woman’s entire Neumera history (athlete years, pregnancies, menopause transition) into one continuous view; specify this explicitly as the core value versus point-solution competitors.
+The five features
+Vitality scoring, healthy-aging insights, mobility trends, cognitive wellness monitoring, and preventative health signals.
+Stack
+Laravel API core, internal Python/FastAPI ML microservice (async boundary, Python internal-only), Flutter client. Sources: HealthKit / Health Connect via the Flutter health plugin, Terra API for cloud wearables, plus the inherited durable longitudinal record. AI on AWS Bedrock under the zero-retention pattern with the de-identification gate on any payload crossing to Bedrock.
+Per feature, specify the honest framing explicitly
+Vitality scoring — NOT a biological-age or validated healthspan claim; a transparent, openable weighted composite of trended domains shown primarily as a trend (holding / rising / declining), each domain separately visible and trended, framed as the user’s own trajectory, never a comparison; deterministic trend math in FastAPI. Mobility trends — gait, steps, activity, strength proxies trended over long windows; encouragement, not diagnosis (the lowest-risk feature). Cognitive wellness monitoring — cognitive WELLNESS, not testing or decline detection; lifestyle-and-engagement support around modifiable levers (sleep, activity, social connection, cognitively stimulating habits); any check-ins are engagement/wellness, never diagnostic, with a route to professional evaluation if concerned; explicitly NOT dementia/MCI screening. Preventative health signals — two low-risk functions only: age/history-appropriate screening reminders (mammogram, DEXA, blood pressure, colonoscopy) and pattern-flagging that routes to a conversation, framed discuss-not-diagnose with an “add to visit notes” action; never risk prediction, probability, or diagnosis; conservative deterministic rules, EVP-owned. Healthy-aging insights — vetted, retrieval-grounded education (EVP lane), not personalized medical advice.
+AI coach — Lifelong Thriving overlay
+The existing platform coach (patent’s layered base-prompt + life-stage-overlay orchestration, Bedrock, zero-retention, cost-routed, tier-metered) with a Lifelong Thriving overlay. Distinctive role: longitudinal narration — the “what carries forward” insights and trend interpretations are coach-authored automated summaries (off-quota), retrieval-grounded in the healthy-aging corpus, wired to route (never diagnose) on preventative-signal flags.
+Module-specific requirements
+Accessibility — this stage skews older; larger default type, high contrast, large tap targets, minimal-step interactions as first-class requirements. Longitudinal inheritance — specify how the module reads forward from prior life-stage engines’ data in the durable record, and how it handles users who arrive without that history (graceful start from present-day signals). Compliance framing — trends, scores, reminders, and education are informational wellness, not diagnosis or risk prediction; signals route to care and defer to the user’s clinician. Phased build: deterministic trend math, screening reminders, and rules-based flags first; any models deferred.
+Regulatory flag to carry into the compliance section
+Include an explicit flag that cognitive wellness monitoring and preventative health signals may approach the FDA’s Software-as-a-Medical-Device (SaMD) boundary depending on implementation, and require regulatory/privacy counsel review before launch. Frame the mitigation as design discipline — engagement-not-testing for cognition, discuss-not-diagnose for signals, auditable rules and provenance — not weakening the features. State that these two features (not the rest of the module) should gate launch on this review.
+Reference exhibits to include and build against
+Exhibit A — Lifelong Thriving “Today” hero (Figure 1): leads with a multi-year vitality trend (number subordinate to slope, with a “see what goes into this — it’s yours, not a comparison” transparency affordance); trended domain cards (mobility, cardiometabolic, sleep, cognitive engagement labelled “habits, not a test”); an age-appropriate screening reminder. Navy/Sand-Gold palette.
+Exhibit B — Life-arc view (Figure 2): a continuous trend line woven through the user’s earlier Neumera life stages (athlete years, pregnancies, perimenopause, now), a coach-authored “what carries forward” insight, and a “look back at any stage” entry — the longitudinal-record differentiator.
+Exhibit C — “Worth a conversation” preventative screen (Figure 3): a flagged trend stated as an observation and explicitly hedged, with an “add to my visit notes” action; age-appropriate screening reminders with clear states; a footer stating these are patterns and reminders, not diagnoses.
+
+Practical note. Cowork cannot ingest the three rendered screens as images from the chat directly — either describe Exhibits A–C in the prompt (as done above) or attach Figures 1–3 from this document to the Cowork session as visual references.
+
