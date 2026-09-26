@@ -716,7 +716,7 @@ def _generate_personalized_fatigue_alerts(
     training_load: TrainingLoadMetric,
     cycle_info: dict[str, Any],
 ) -> list[FatigueAlert]:
-    """Generate personalized fatigue alerts using Claude AI."""
+    """Generate personalized fatigue alerts using Claude AI (compact format, no messages)."""
     try:
         # Build context for Claude
         context = f"""Analyze the athlete's current status and generate 3 personalized fatigue risk alerts.
@@ -734,14 +734,12 @@ GENERATE 3 PERSONALIZED FATIGUE ALERTS with these exact fields:
 2. Injury Risk Index - based on HRV trends and cycle phase
 3. Cumulative Fatigue - based on sleep, recovery, and HRV patterns
 
-For each alert, respond with JSON array containing:
+For each alert, respond with JSON array containing ONLY type and level (no message):
 {{
   "type": "overtraining_risk" | "injury_risk_index" | "cumulative_fatigue",
-  "level": "low" | "moderate" | "high",
-  "message": "Personalized insight explaining this specific alert for this athlete"
+  "level": "low" | "moderate" | "high"
 }}
 
-IMPORTANT: Be specific about THIS athlete's situation. Reference their actual metrics.
 Respond ONLY with valid JSON array, no markdown or explanation."""
 
         response = llm_call(context)
@@ -752,28 +750,28 @@ Respond ONLY with valid JSON array, no markdown or explanation."""
             alerts.append(FatigueAlert(
                 type=alert_data.get("type", "cumulative_fatigue"),
                 level=alert_data.get("level", "moderate"),
-                message=alert_data.get("message", "Monitor your training and recovery."),
+                message="",  # Keep message empty for compact format
             ))
         
         return alerts
     except Exception as e:
         print(f"[ERROR] _generate_personalized_fatigue_alerts: {e}")
-        # Return default alerts if Claude fails
+        # Return default alerts if Claude fails (compact format, no messages)
         return [
             FatigueAlert(
                 type="overtraining_risk",
                 level="low",
-                message="Training load is within normal range.",
+                message="",
             ),
             FatigueAlert(
                 type="injury_risk_index",
                 level="low",
-                message="Injury risk is low based on current metrics.",
+                message="",
             ),
             FatigueAlert(
                 type="cumulative_fatigue",
                 level="moderate",
-                message="Monitor cumulative fatigue over time.",
+                message="",
             ),
         ]
 
@@ -1081,3 +1079,220 @@ def _generate_readiness_metrics_with_claude(context: str) -> dict[str, Any]:
             "training_load_status": "moderate",
             "training_load_trend": 0,
         }
+
+def get_cycle_training_focus(user_id: int, cycle_phase: str) -> dict[str, Any]:
+    """Generate compact training focus recommendations for a specific cycle phase.
+    
+    Args:
+        user_id: The user's ID
+        cycle_phase: menstrual | follicular | ovulation | luteal
+    
+    Returns:
+        Dictionary with cycle_phase, phase_day, focus, and recommendations
+    """
+    from fastapi import HTTPException
+    
+    try:
+        # Validate user exists
+        profile = get_user_profile(user_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+        
+        # Normalize cycle phase (handle "ovulatory" as "ovulation", strip whitespace)
+        phase_map = {
+            "menstrual": "menstrual",
+            "follicular": "follicular",
+            "ovulation": "ovulation",
+            "ovulatory": "ovulation",
+            "luteal": "luteal",
+        }
+        normalized_phase = phase_map.get(cycle_phase.strip().lower())
+        if not normalized_phase:
+            raise ValueError(f"Invalid cycle phase: {cycle_phase}")
+        
+        # Get current cycle day (from menstrual_cycles table, not from readiness calculation)
+        cycle = get_current_cycle(user_id)
+        cycle_day = 0
+        if cycle and cycle.get("period_start_date"):
+            period_start = cycle.get("period_start_date")
+            if isinstance(period_start, str):
+                from datetime import datetime as dt
+                period_start = dt.fromisoformat(period_start).date()
+            from datetime import date
+            today = date.today()
+            cycle_day_raw = (today - period_start).days + 1
+            if 1 <= cycle_day_raw <= 100:
+                cycle_day = ((cycle_day_raw - 1) % 28) + 1
+        
+        # Build compact context for Claude with cycle day
+        context = _build_compact_phase_context_optimized(
+            user_id, 
+            normalized_phase, 
+            cycle_day
+        )
+        
+        # Call Claude for compact recommendations
+        llm_response = _generate_compact_phase_recommendations_with_claude(context)
+        
+        return {
+            "cycle_phase": normalized_phase,
+            "phase_day": f"D{cycle_day}" if cycle_day > 0 else "Unknown",
+            "focus": llm_response.get("focus", ""),
+            "recommendations": llm_response.get("recommendations", []),
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] get_cycle_training_focus failed: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+        }
+
+
+def _build_compact_phase_context_optimized(
+    user_id: int, 
+    cycle_phase: str, 
+    cycle_day: int
+) -> str:
+    """Build compact context for Claude to generate concise phase recommendations."""
+    
+    # Map cycle day to phase day label (D1-D28)
+    phase_day_label = f"D{cycle_day}" if cycle_day > 0 else "Unknown"
+    
+    # Define phase characteristics for Claude
+    phase_guide = {
+        "menstrual": "Days 1-5: Low energy, hormone dip, recovery focus",
+        "follicular": "Days 6-13: Rising energy, strength building, new challenges",
+        "ovulation": "Days 14-16: Peak performance, max effort, high intensity",
+        "luteal": "Days 17-28: Stable energy, endurance focus, fatigue management"
+    }
+    
+    phase_desc = phase_guide.get(cycle_phase, "Unknown phase")
+    
+    context = f"""Generate COMPACT training focus. Return ONLY JSON (no markdown):
+
+Cycle Phase: {cycle_phase.upper()} ({phase_desc})
+Cycle Day: {phase_day_label}
+
+Return:
+{{
+    "focus": "One-line focus (3-5 words max)",
+    "recommendations": ["4-5 recommendations max, 8 words each"]
+}}"""
+    
+    return context
+
+
+def _generate_compact_phase_recommendations_with_claude(context: str) -> dict[str, Any]:
+    """Call Claude to generate compact phase recommendations."""
+    try:
+        # Call Claude LLM using the standard llm_call function
+        response = llm_call(context)
+        
+        # Parse JSON response
+        recommendations = json.loads(response)
+        
+        # Validate and return response
+        return {
+            "phase_day": recommendations.get("phase_day", ""),
+            "focus": recommendations.get("focus", ""),
+            "recommendations": recommendations.get("recommendations", []),
+        }
+    
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] Failed to parse Claude response as JSON: {e}")
+        # Return safe defaults if JSON parsing fails
+        return {
+            "phase_day": "",
+            "focus": "Rest and recovery",
+            "recommendations": ["Listen to your body", "Prioritize sleep", "Hydrate well"],
+        }
+    
+    except Exception as e:
+        print(f"[ERROR] _generate_compact_phase_recommendations_with_claude failed: {e}")
+        # Return safe defaults if Claude call fails
+        return {
+            "phase_day": "",
+            "focus": "Rest and recovery",
+            "recommendations": ["Listen to your body", "Prioritize sleep", "Hydrate well"],
+        }
+
+
+def get_unified_athlete_performance(user_id: int, cycle_phase: str) -> dict[str, Any]:
+    """
+    Get unified athlete performance combining readiness score and cycle training focus.
+    LLM generates phase-specific insights based on readiness metrics.
+    
+    Args:
+        user_id: The user's ID
+        cycle_phase: menstrual | follicular | ovulation | luteal
+    
+    Returns:
+        Dictionary with readiness data + cycle training focus combined
+    """
+    from fastapi import HTTPException
+    
+    try:
+        # Validate user exists
+        profile = get_user_profile(user_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+        
+        # Get readiness data (includes actual cycle info from database)
+        readiness_data = athlete_readiness(user_id)
+        if isinstance(readiness_data, dict) and "status" in readiness_data:
+            # Readiness failed, propagate error
+            raise HTTPException(
+                status_code=500, 
+                detail="Failed to calculate readiness score"
+            )
+        
+        # Get cycle training focus using provided phase
+        cycle_training = get_cycle_training_focus(user_id, cycle_phase)
+        if isinstance(cycle_training, dict) and "status" in cycle_training:
+            # Cycle training failed, propagate error
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate cycle training recommendations"
+            )
+        
+        # Combine readiness data with cycle training focus
+        unified_response = {
+            # Readiness info
+            "date": readiness_data.get("date"),
+            "readiness_score": readiness_data.get("readiness_score"),
+            "readiness_level": readiness_data.get("readiness_level"),
+            
+            # Quick metrics (for UI cards)
+            "hrv": readiness_data.get("hrv"),
+            "recovery": readiness_data.get("recovery"),
+            "training_load": readiness_data.get("training_load"),
+            
+            # Full metrics
+            "metrics": readiness_data.get("metrics"),
+            "fatigue_alerts": readiness_data.get("fatigue_alerts", []),
+            "cycle_info": readiness_data.get("cycle_info"),
+            
+            # Cycle training focus (LLM generates based on readiness + phase)
+            "training_focus": {
+                "cycle_phase": cycle_training.get("cycle_phase"),
+                "phase_day": cycle_training.get("phase_day"),
+                "focus": cycle_training.get("focus"),
+                "recommendations": cycle_training.get("recommendations", []),
+            },
+            
+            "next_update": readiness_data.get("next_update"),
+        }
+        
+        return unified_response
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] get_unified_athlete_performance failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unified performance calculation failed: {str(e)}"
+        )
