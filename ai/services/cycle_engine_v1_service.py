@@ -62,6 +62,41 @@ HORMONE_BY_PHASE = {
     "luteal": {"estrogen": "declining", "progesterone": "high", "lh": "declining"},
 }
 
+# Numeric hormone trends modeled from the latest cervical_mucus_logs.consistency value.
+HORMONE_TRENDS_BY_MUCUS: dict[str, dict[str, dict[str, Any]]] = {
+    "dry": {
+        "estrogen": {"value": 40.0, "status": "Low"},
+        "progesterone": {"value": 8.0, "status": "Normal"},
+        "lh": {"value": 12.0, "status": "Low"},
+    },
+    "sticky": {
+        "estrogen": {"value": 90.0, "status": "Low"},
+        "progesterone": {"value": 6.0, "status": "Normal"},
+        "lh": {"value": 15.0, "status": "Low"},
+    },
+    "creamy": {
+        "estrogen": {"value": 150.0, "status": "Rising"},
+        "progesterone": {"value": 4.0, "status": "Normal"},
+        "lh": {"value": 20.0, "status": "Moderate"},
+    },
+    "watery": {
+        "estrogen": {"value": 240.0, "status": "High"},
+        "progesterone": {"value": 2.0, "status": "Low"},
+        "lh": {"value": 45.0, "status": "High"},
+    },
+    "egg_white": {
+        "estrogen": {"value": 284.0, "status": "Optimal"},
+        "progesterone": {"value": 12.4, "status": "Normal"},
+        "lh": {"value": 68.0, "status": "High"},
+    },
+}
+
+HORMONE_TREND_META = {
+    "estrogen": {"name": "Estrogen (E2)", "unit": "pg/mL", "max": 350.0},
+    "progesterone": {"name": "Progesterone", "unit": "ng/mL", "max": 20.0},
+    "lh": {"name": "LH Surge", "unit": "mIU/mL", "max": 80.0},
+}
+
 PHASE_WHEEL_STATUS = {
     "menstrual": "Low",
     "follicular": "Rising",
@@ -1258,6 +1293,36 @@ def awareness_current_phase(user_id: int) -> dict[str, Any]:
     )
 
 
+def _latest_mucus_consistency(state: dict[str, Any]) -> str | None:
+    """Return the most recent cervical_mucus_logs.consistency value, if any."""
+    logs = state.get("mucus_logs") or []
+    if not logs:
+        return None
+    latest = max(logs, key=lambda log: log.get("date") or "")
+    return latest.get("type")
+
+
+def _hormone_trends_from_mucus(consistency: str | None) -> list[dict[str, Any]]:
+    """Build numeric hormone-trend cards from the latest logged mucus consistency."""
+    entry = HORMONE_TRENDS_BY_MUCUS.get(consistency or "", HORMONE_TRENDS_BY_MUCUS["creamy"])
+    trends = []
+    for key in ("estrogen", "progesterone", "lh"):
+        meta = HORMONE_TREND_META[key]
+        data = entry[key]
+        value = data["value"]
+        bar_percent = max(0, min(100, round(value / meta["max"] * 100)))
+        trends.append(
+            {
+                "name": meta["name"],
+                "value": value,
+                "unit": meta["unit"],
+                "status": data["status"],
+                "bar_percent": bar_percent,
+            }
+        )
+    return trends
+
+
 def awareness_hormone_levels(user_id: int) -> dict[str, Any]:
     """Modeled from phase — not measured lab hormone data."""
     if not _has_cycle_data(user_id):
@@ -1266,13 +1331,17 @@ def awareness_hormone_levels(user_id: int) -> dict[str, Any]:
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     levels = HORMONE_BY_PHASE[state["current_phase"]]
+    mucus_consistency = _latest_mucus_consistency(state)
+    hormone_trends = _hormone_trends_from_mucus(mucus_consistency)
+    trend_source = "cervical_mucus_logs" if mucus_consistency else "cycle_phase_lookup"
     fallback = {
         **levels,
         "modeled": True,
-        "source": "cycle_phase_lookup",
+        "source": trend_source,
         "note": "Qualitative hormone display is derived from cycle phase, not lab measurements.",
+        "hormone_trends": hormone_trends,
     }
-    return _ai_endpoint_response(
+    result = _ai_endpoint_response(
         "awareness_hormone_levels",
         state,
         (
@@ -1284,6 +1353,10 @@ def awareness_hormone_levels(user_id: int) -> dict[str, Any]:
         fallback,
         max_tokens=400,
     )
+    # hormone_trends numbers are derived from cervical_mucus_logs, never AI-generated.
+    result["hormone_trends"] = hormone_trends
+    result["source"] = trend_source
+    return result
 
 
 def awareness_phase_education(user_id: int) -> dict[str, Any]:
