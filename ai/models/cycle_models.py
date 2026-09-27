@@ -131,6 +131,10 @@ class CycleOverviewResponse(BaseModel):
     fertile_window: FertileWindow = Field(..., description="Fertile window analysis")
     bbt_analysis: Optional[BBTAnalysis] = Field(None, description="BBT analysis if available")
     cycle_history: CycleHistory = Field(..., description="Historical cycle data")
+    hormone_trends: List[dict] = Field(
+        default_factory=list,
+        description="Numeric hormone trends derived from latest cervical mucus log"
+    )
     ai_insights: dict = Field(
         default_factory=dict,
         description="Claude AI generated insights"

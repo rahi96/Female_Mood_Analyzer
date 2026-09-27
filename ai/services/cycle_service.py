@@ -16,6 +16,7 @@ from ai.models.cycle_models import (
     BBTAnalysis,
     CycleHistory,
 )
+from ai.services.cycle_engine_v1_service import _hormone_trends_from_mucus
 from ai.utils.claude_llm import ClaudeLLM
 from ai.utils.db import get_connection
 
@@ -104,6 +105,10 @@ def get_cycle_overview(user_id: int, mode: str = "standard", include_bbt: bool =
         # Get cycle history
         cycle_history = _fetch_cycle_history(user_id)
         
+        # Fetch latest mucus consistency and build hormone trends
+        mucus_consistency = _fetch_latest_mucus_consistency(current_cycle["id"])
+        hormone_trends = _hormone_trends_from_mucus(mucus_consistency)
+        
         # Build context for Claude
         context = _build_cycle_context(
             metrics=cycle_metrics,
@@ -123,6 +128,7 @@ def get_cycle_overview(user_id: int, mode: str = "standard", include_bbt: bool =
             fertile_window=fertile_window,
             bbt_analysis=bbt_analysis,
             cycle_history=cycle_history,
+            hormone_trends=hormone_trends,
             ai_insights=ai_insights
         )
     
@@ -239,6 +245,27 @@ def _fetch_cycle_history(user_id: int, months: int = 6) -> CycleHistory:
     except Exception as exc:
         logger.error(f"Error fetching cycle history: {exc}")
         return CycleHistory()
+
+
+def _fetch_latest_mucus_consistency(cycle_id: int) -> Optional[str]:
+    """Fetch the most recent cervical mucus consistency for a given cycle."""
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT consistency
+                FROM cervical_mucus_logs
+                WHERE cycle_id = %s
+                ORDER BY log_date DESC
+                LIMIT 1
+            """, (cycle_id,))
+            
+            row = cur.fetchone()
+            return row.get("consistency") if row else None
+    
+    except Exception as exc:
+        logger.error(f"Error fetching latest mucus consistency: {exc}")
+        return None
 
 
 def _build_cycle_metrics(cycle_data: Dict[str, Any]) -> CycleMetrics:
