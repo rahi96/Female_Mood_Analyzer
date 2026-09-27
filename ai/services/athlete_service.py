@@ -1082,22 +1082,17 @@ def _generate_readiness_metrics_with_claude(context: str) -> dict[str, Any]:
 
 def get_cycle_training_focus(user_id: int, cycle_phase: str) -> dict[str, Any]:
     """Generate compact training focus recommendations for a specific cycle phase.
-    
-    Args:
-        user_id: The user's ID
-        cycle_phase: menstrual | follicular | ovulation | luteal
-    
-    Returns:
-        Dictionary with cycle_phase, phase_day, focus, and recommendations
+
+    Returns cycle_phase, focus, and exactly 4 recommendations.
+    Frontend owns day ranges/labels, so no day data is returned here.
     """
     from fastapi import HTTPException
-    
+
     try:
-        # Validate user exists
         profile = get_user_profile(user_id)
         if not profile:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-        
+
         # Normalize cycle phase (handle "ovulatory" as "ovulation", strip whitespace)
         phase_map = {
             "menstrual": "menstrual",
@@ -1109,115 +1104,126 @@ def get_cycle_training_focus(user_id: int, cycle_phase: str) -> dict[str, Any]:
         normalized_phase = phase_map.get(cycle_phase.strip().lower())
         if not normalized_phase:
             raise ValueError(f"Invalid cycle phase: {cycle_phase}")
-        
-        # Get current cycle day (from menstrual_cycles table, not from readiness calculation)
-        cycle = get_current_cycle(user_id)
-        cycle_day = 0
-        if cycle and cycle.get("period_start_date"):
-            period_start = cycle.get("period_start_date")
-            if isinstance(period_start, str):
-                from datetime import datetime as dt
-                period_start = dt.fromisoformat(period_start).date()
-            from datetime import date
-            today = date.today()
-            cycle_day_raw = (today - period_start).days + 1
-            if 1 <= cycle_day_raw <= 100:
-                cycle_day = ((cycle_day_raw - 1) % 28) + 1
-        
-        # Build compact context for Claude with cycle day
-        context = _build_compact_phase_context_optimized(
-            user_id, 
-            normalized_phase, 
-            cycle_day
-        )
-        
-        # Call Claude for compact recommendations
-        llm_response = _generate_compact_phase_recommendations_with_claude(context)
-        
+
+        context = _build_compact_phase_context_optimized(normalized_phase)
+        llm_response = _generate_compact_phase_recommendations_with_claude(normalized_phase, context)
+
         return {
             "cycle_phase": normalized_phase,
-            "phase_day": f"D{cycle_day}" if cycle_day > 0 else "Unknown",
             "focus": llm_response.get("focus", ""),
             "recommendations": llm_response.get("recommendations", []),
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"[ERROR] get_cycle_training_focus failed: {e}")
-        return {
-            "status": "error",
-            "message": str(e),
-        }
+        return _phase_fallback(cycle_phase.strip().lower())
 
 
-def _build_compact_phase_context_optimized(
-    user_id: int, 
-    cycle_phase: str, 
-    cycle_day: int
-) -> str:
+def _phase_fallback(phase: str) -> dict[str, Any]:
+    """Deterministic 4-recommendation fallback per phase (3-4 words each)."""
+    data = {
+        "menstrual": {
+            "focus": "Rest and recover",
+            "recommendations": [
+                "Restorative gentle yoga",
+                "Light easy walking",
+                "Stretching and mobility",
+                "Prioritize deep sleep",
+            ],
+        },
+        "follicular": {
+            "focus": "Build strength progressively",
+            "recommendations": [
+                "Heavy strength training",
+                "Progressive load increases",
+                "High-intensity intervals",
+                "Try new challenges",
+            ],
+        },
+        "ovulation": {
+            "focus": "Peak performance",
+            "recommendations": [
+                "Max effort workouts",
+                "Compete or test 1RMs",
+                "High-intensity cardio",
+                "Optimal coordinated power",
+            ],
+        },
+        "luteal": {
+            "focus": "Steady endurance focus",
+            "recommendations": [
+                "Steady-state cardio",
+                "Moderate strength work",
+                "Longer easy sessions",
+                "Active recovery days",
+            ],
+        },
+    }
+    key = "ovulation" if phase == "ovulatory" else phase
+    entry = data.get(key, {
+        "focus": "Balanced training",
+        "recommendations": [
+            "Moderate strength work",
+            "Varied intensity sessions",
+            "Listen to body",
+            "Recover as needed",
+        ],
+    })
+    return {"cycle_phase": key, "focus": entry["focus"], "recommendations": entry["recommendations"]}
+
+
+def _build_compact_phase_context_optimized(cycle_phase: str) -> str:
     """Build compact context for Claude to generate concise phase recommendations."""
     
-    # Map cycle day to phase day label (D1-D28)
-    phase_day_label = f"D{cycle_day}" if cycle_day > 0 else "Unknown"
-    
-    # Define phase characteristics for Claude
     phase_guide = {
-        "menstrual": "Days 1-5: Low energy, hormone dip, recovery focus",
-        "follicular": "Days 6-13: Rising energy, strength building, new challenges",
-        "ovulation": "Days 14-16: Peak performance, max effort, high intensity",
-        "luteal": "Days 17-28: Stable energy, endurance focus, fatigue management"
+        "menstrual": "Low energy, hormone dip, recovery focus",
+        "follicular": "Rising energy, strength building, new challenges",
+        "ovulation": "Peak performance, max effort, high intensity",
+        "luteal": "Stable energy, endurance focus, fatigue management",
     }
-    
-    phase_desc = phase_guide.get(cycle_phase, "Unknown phase")
-    
+
+    phase_desc = phase_guide.get(cycle_phase, "Balanced training")
+
     context = f"""Generate COMPACT training focus. Return ONLY JSON (no markdown):
 
 Cycle Phase: {cycle_phase.upper()} ({phase_desc})
-Cycle Day: {phase_day_label}
 
-Return:
+Return EXACTLY this shape:
 {{
-    "focus": "One-line focus (3-5 words max)",
-    "recommendations": ["4-5 recommendations max, 8 words each"]
-}}"""
-    
+    "focus": "One-line focus (3-5 words)",
+    "recommendations": ["exactly 4 items", "each 3-4 words", "no more no less", "short imperative"]
+}}
+
+Rules: recommendations MUST contain exactly 4 strings, each 3-4 words."""
+
     return context
 
 
-def _generate_compact_phase_recommendations_with_claude(context: str) -> dict[str, Any]:
-    """Call Claude to generate compact phase recommendations."""
+def _generate_compact_phase_recommendations_with_claude(phase: str, context: str) -> dict[str, Any]:
+    """Call Claude to generate compact phase recommendations (exactly 4)."""
     try:
-        # Call Claude LLM using the standard llm_call function
         response = llm_call(context)
-        
-        # Parse JSON response
-        recommendations = json.loads(response)
-        
-        # Validate and return response
-        return {
-            "phase_day": recommendations.get("phase_day", ""),
-            "focus": recommendations.get("focus", ""),
-            "recommendations": recommendations.get("recommendations", []),
-        }
-    
-    except json.JSONDecodeError as e:
-        print(f"[ERROR] Failed to parse Claude response as JSON: {e}")
-        # Return safe defaults if JSON parsing fails
-        return {
-            "phase_day": "",
-            "focus": "Rest and recovery",
-            "recommendations": ["Listen to your body", "Prioritize sleep", "Hydrate well"],
-        }
-    
+        parsed = json.loads(response)
+
+        focus = parsed.get("focus", "") or _phase_fallback(phase)["focus"]
+        recs = parsed.get("recommendations", [])
+        if not isinstance(recs, list):
+            recs = []
+        recs = [str(r).strip() for r in recs if str(r).strip()]
+
+        # Enforce exactly 4: pad from fallback, then truncate.
+        if len(recs) < 4:
+            recs += _phase_fallback(phase)["recommendations"]
+        recs = recs[:4]
+
+        return {"focus": focus, "recommendations": recs}
+
     except Exception as e:
         print(f"[ERROR] _generate_compact_phase_recommendations_with_claude failed: {e}")
-        # Return safe defaults if Claude call fails
-        return {
-            "phase_day": "",
-            "focus": "Rest and recovery",
-            "recommendations": ["Listen to your body", "Prioritize sleep", "Hydrate well"],
-        }
+        fb = _phase_fallback(phase)
+        return {"focus": fb["focus"], "recommendations": fb["recommendations"]}
 
 
 def get_unified_athlete_performance(user_id: int) -> dict[str, Any]:
@@ -1251,16 +1257,11 @@ def get_unified_athlete_performance(user_id: int) -> dict[str, Any]:
         
         for phase in phases:
             cycle_training = get_cycle_training_focus(user_id, phase)
-            if isinstance(cycle_training, dict) and "status" in cycle_training:
-                continue  # Skip if this phase fails, try next
-            
-            phase_card = {
+            phase_cards.append({
                 "phase": phase,
-                "phase_day": cycle_training.get("phase_day", ""),
                 "focus": cycle_training.get("focus", ""),
                 "recommendations": cycle_training.get("recommendations", []),
-            }
-            phase_cards.append(phase_card)
+            })
         
         # Build unified response with current readiness + 4 phase cards
         unified_response = {
