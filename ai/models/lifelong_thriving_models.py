@@ -222,8 +222,96 @@ class RemindersSnapshot(BaseModel):
     not_applicable: int = 0
 
 
+class PreventativeRemindersResponse(BaseModel):
+    """Response for Preventative Health Reminders endpoint."""
+    reminders: List[HealthReminder] = Field(..., description="Preventative health reminders")
+    summary: RemindersSnapshot = Field(..., description="Summary statistics")
+    last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "reminders": [
+                    {
+                        "id": 1,
+                        "type": "Mammogram",
+                        "status": "overdue",
+                        "priority": "critical",
+                        "last_done": "2024-06-15",
+                        "due_date": "2026-06-15",
+                        "days_overdue": 101,
+                        "guideline": "Annual for ages 40+",
+                        "recommendation": "Schedule immediately",
+                        "status_label": "Overdue",
+                        "status_color": "red"
+                    },
+                    {
+                        "id": 2,
+                        "type": "Bone Density Scan",
+                        "status": "due_soon",
+                        "priority": "high",
+                        "last_done": "2025-01-20",
+                        "due_date": "2026-10-20",
+                        "days_until_due": 22,
+                        "guideline": "Every 1-2 years for ages 50+",
+                        "recommendation": "Schedule in next 2-3 weeks",
+                        "status_label": "Due soon",
+                        "status_color": "orange"
+                    }
+                ],
+                "summary": {
+                    "total_reminders": 9,
+                    "overdue": 1,
+                    "due_soon": 2,
+                    "scheduled": 1,
+                    "up_to_date": 5,
+                    "not_applicable": 0
+                }
+            }
+        }
+
+
+class MobilityStressIndicatorsResponse(BaseModel):
+    """Response for Mobility & Stress Indicators endpoint."""
+    indicators: List[MobilityStressMetric] = Field(..., description="Mobility and stress metrics")
+    overall_mobility_score: float = Field(..., ge=0, le=100, description="Average mobility score")
+    overall_stress_status: str = Field(..., description="Overall stress status: good, moderate, needs_attention")
+    last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "indicators": [
+                    {
+                        "area": "Hip Flexibility",
+                        "score": 78,
+                        "status": "good",
+                        "last_measured": "2026-09-20",
+                        "recommendation": "Continue current stretching routine"
+                    },
+                    {
+                        "area": "Grip Strength",
+                        "score": 82,
+                        "status": "good",
+                        "last_measured": "2026-09-18",
+                        "recommendation": None
+                    },
+                    {
+                        "area": "Balance Score",
+                        "score": 65,
+                        "status": "moderate",
+                        "last_measured": "2026-09-15",
+                        "recommendation": "Increase balance training exercises"
+                    }
+                ],
+                "overall_mobility_score": 75,
+                "overall_stress_status": "good"
+            }
+        }
+
+
 class RemindersResponse(BaseModel):
-    """Response for Reminders Tab API."""
+    """Response for Reminders Tab API (combined - kept for backward compatibility)."""
     reminders: List[HealthReminder] = Field(..., description="Preventative health reminders")
     mobility_stress_reminders: List[MobilityStressMetric] = Field(
         default_factory=list,

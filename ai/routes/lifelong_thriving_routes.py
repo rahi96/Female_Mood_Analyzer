@@ -19,7 +19,9 @@ from typing import Optional
 from ai.models.lifelong_thriving_models import (
     VitalityResponse,
     LifeArcResponse,
-    RemindersResponse
+    RemindersResponse,
+    PreventativeRemindersResponse,
+    MobilityStressIndicatorsResponse
 )
 from ai.services.lifelong_thriving_service import (
     VitalityService, LifeArcService, RemindersService
@@ -284,6 +286,196 @@ async def get_reminders(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error generating reminders: {str(e)}"
+        )
+
+
+# ============================================================================
+# PREVENTATIVE REMINDERS ENDPOINT (Split from combined reminders)
+# ============================================================================
+
+@router.get(
+    "/preventative-reminders",
+    response_model=PreventativeRemindersResponse,
+    summary="Get Preventative Health Reminders",
+    description="""
+    Generate evidence-based preventative health reminders with dynamic status.
+    
+    ### Features:
+    - **Medical Guidelines Compliance**: Screening recommendations based on:
+      - Age and life stage
+      - Gender-specific guidelines
+      - Personalized risk assessment
+    
+    - **Dynamic Status**: Real-time determination based on:
+      - **OVERDUE**: Last screening > (guideline interval + 30 days)
+      - **DUE_SOON**: Days until due ≤ 30 days
+      - **SCHEDULED**: Appointment explicitly booked
+      - **UP_TO_DATE**: Within guideline intervals
+      - **NOT_APPLICABLE**: Outside age range or not needed
+    
+    - **Priority Ranking**: 1-5 scale based on:
+      - Medical urgency
+      - User's risk profile
+      - Current health status
+      - Evidence-based guidelines
+    
+    ### Included Screenings:
+    - Mammogram (Age 40+, annual)
+    - Bone Density Scan (Age 50+, every 1-2 years)
+    - Colonoscopy (Age 45+, every 10 years)
+    - Pap Smear (Age 21+, every 3 years)
+    - Blood Pressure (Age 18+, every 2 years)
+    - Cholesterol Panel (Age 20+, every 4 years)
+    - Skin Cancer Check (Annual)
+    - Eye Exam (Every 1-2 years)
+    - Dental Checkup (Annual)
+    
+    ### Personalization:
+    - Calculates due dates from actual last screening dates
+    - Adapts recommendations based on health history
+    - No hardcoded dates—entirely dynamic
+    """,
+    responses={200: {"model": PreventativeRemindersResponse, "description": "Preventative reminders generated successfully"}}
+)
+async def get_preventative_reminders(
+    user_id: int = Query(..., gt=0, description="User ID (must be > 0)"),
+    include_ai_insights: bool = Query(True, description="Include AI context and recommendations")
+) -> PreventativeRemindersResponse:
+    """
+    Get preventative health reminders (medical screenings only).
+    
+    **Query Parameters:**
+    - `user_id` (required): User ID
+    - `include_ai_insights` (optional, default=True): Include AI context
+    
+    **Example Requests:**
+    ```
+    GET /api/v1/lifelong-thriving/preventative-reminders?user_id=2&include_ai_insights=true
+    GET /api/v1/lifelong-thriving/preventative-reminders?user_id=2
+    ```
+    
+    **Response Includes:**
+    - Preventative screenings with status
+    - Due dates and days overdue/until due
+    - Priority ranking
+    - Summary statistics by status
+    """
+    try:
+        # Create service and get reminders
+        service = RemindersService(user_id=user_id)
+        response = service.get_preventative_reminders()
+        
+        # Return only the reminders and summary
+        return PreventativeRemindersResponse(
+            reminders=response.reminders,
+            summary=response.summary,
+            last_updated=response.last_updated
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating preventative reminders: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating preventative reminders: {str(e)}"
+        )
+
+
+# ============================================================================
+# MOBILITY & STRESS INDICATORS ENDPOINT (Split from combined reminders)
+# ============================================================================
+
+@router.get(
+    "/mobility-stress-indicators",
+    response_model=MobilityStressIndicatorsResponse,
+    summary="Get Mobility & Stress Indicators",
+    description="""
+    Get secondary health metrics focusing on mobility and stress indicators.
+    
+    ### Features:
+    - **Mobility Metrics**: Track strength, flexibility, balance, and range of motion
+    - **Stress Indicators**: Monitor anxiety levels, stress hormones, and emotional resilience
+    - **Trend Analysis**: Historical tracking to show improvements or declines
+    - **Personalized Recommendations**: Activity suggestions based on current scores
+    
+    ### Tracked Indicators:
+    - Hip Flexibility
+    - Grip Strength
+    - Balance Score
+    - Overall Posture
+    - Stress Level
+    - Sleep Quality Impact
+    - Activity Engagement
+    
+    ### Scoring:
+    - **0-40**: Low - Needs attention and intervention
+    - **41-70**: Moderate - Room for improvement
+    - **71-100**: Good - Healthy and well-maintained
+    
+    ### Personalization:
+    - Based on actual health logs and activity data
+    - Contextual to user's age and life stage
+    - Provides specific activity recommendations
+    """,
+    responses={200: {"model": MobilityStressIndicatorsResponse, "description": "Mobility & stress indicators retrieved successfully"}}
+)
+async def get_mobility_stress_indicators(
+    user_id: int = Query(..., gt=0, description="User ID (must be > 0)")
+) -> MobilityStressIndicatorsResponse:
+    """
+    Get mobility and stress health indicators.
+    
+    **Query Parameters:**
+    - `user_id` (required): User ID
+    
+    **Example Requests:**
+    ```
+    GET /api/v1/lifelong-thriving/mobility-stress-indicators?user_id=2
+    ```
+    
+    **Response Includes:**
+    - Individual mobility and stress metrics
+    - Overall mobility score (0-100)
+    - Overall stress status (good, moderate, needs_attention)
+    - Recommendations for improvement
+    """
+    try:
+        # Create service and get reminders
+        service = RemindersService(user_id=user_id)
+        response = service.get_preventative_reminders()
+        
+        # Calculate overall mobility score
+        mobility_metrics = response.mobility_stress_reminders
+        overall_mobility_score = (
+            sum(m.score for m in mobility_metrics) / len(mobility_metrics)
+            if mobility_metrics
+            else 75.0
+        )
+        
+        # Determine overall stress status
+        if overall_mobility_score >= 70:
+            overall_stress_status = "good"
+        elif overall_mobility_score >= 50:
+            overall_stress_status = "moderate"
+        else:
+            overall_stress_status = "needs_attention"
+        
+        # Return only the mobility/stress metrics
+        return MobilityStressIndicatorsResponse(
+            indicators=mobility_metrics,
+            overall_mobility_score=overall_mobility_score,
+            overall_stress_status=overall_stress_status,
+            last_updated=response.last_updated
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating mobility/stress indicators: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating mobility/stress indicators: {str(e)}"
         )
 
 
