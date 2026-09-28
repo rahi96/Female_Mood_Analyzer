@@ -17,16 +17,26 @@ class PregnancyAlert(BaseModel):
 
 
 class PregnancySummary(BaseModel):
-    """Pregnancy summary with current status."""
+    """Pregnancy summary with current status and journey tracking."""
     is_pregnant: bool = Field(..., description="Whether user is currently pregnant")
-    current_week: int = Field(..., ge=0, le=40, description="Current pregnancy week (0-40)")
-    current_trimester: str = Field(..., description="First, Second, or Third")
+    current_week: int = Field(..., ge=0, le=42, description="Current pregnancy week (0-42, >40 = postpartum)")
+    current_trimester: str = Field(..., description="First, Second, Third, or Postpartum")
     due_date: Optional[str] = Field(None, description="Expected due date (ISO format)")
     days_until_due: Optional[int] = Field(None, ge=0, description="Days remaining until due date")
     last_prenatal_visit: Optional[str] = Field(None, description="Date of last prenatal visit")
     next_appointment: Optional[str] = Field(None, description="Date of next scheduled appointment")
     health_status: str = Field(default="good", description="good, fair, needs_attention")
     alerts: List[PregnancyAlert] = Field(default_factory=list, description="Active pregnancy alerts")
+    baby_development: str = Field(..., description="Narrative description of baby development at current week")
+    your_body: str = Field(..., description="Narrative description of body changes at current week")
+    nutrition_focus: str = Field(..., description="Personalized nutrition recommendations for current week")
+    safe_exercises: str = Field(..., description="Safe exercise recommendations for current week")
+    clinical_monitoring: List[Dict[str, str]] = Field(default_factory=list, description="Next 5 major clinical tests")
+    clinical_warning_signs: str = Field(default="", description="Critical warning signs to seek immediate care for current week")
+    pregnancy_status: str = Field(..., description="active_pregnancy, pregnancy_with_loss, postpartum_ready, or postpartum")
+    requires_confirmation: bool = Field(default=False, description="Whether frontend should show confirmation popup")
+    confirmation_needed_for: Optional[str] = Field(None, description="miscarriage or delivery (if requires_confirmation=True)")
+    confirmation_message: Optional[str] = Field(None, description="Popup message to show user (if requires_confirmation=True)")
 
 
 # ============================================================================
@@ -48,7 +58,7 @@ class PregnancyMilestones(BaseModel):
     your_body: str = Field(..., description="Narrative description of body changes")
     nutrition_focus: str = Field(..., description="Narrative nutrition recommendations")
     safe_exercises: str = Field(..., description="Narrative safe exercise recommendations")
-    clinical_monitoring: List[ClinicalTest] = Field(..., description="List of scheduled clinical tests with dates")
+    clinical_monitoring: List[Dict[str, str]] = Field(..., description="Next 5 major clinical tests (unified view)")
     clinical_warning_signs: str = Field(..., description="Red flag warning signs to watch for")
 
 
