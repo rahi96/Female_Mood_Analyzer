@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import queue
+import threading
 from contextlib import contextmanager
 from typing import Any
 import logging
@@ -14,11 +16,17 @@ from ai.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Reuse TCP connections to remote RDS instead of a fresh handshake per query -
+# a single endpoint can issue 10+ sequential queries, which was previously
+# opening 10+ new connections and causing multi-second/timeout latency.
+_POOL_MAX_SIZE = 20
+_pool: "queue.LifoQueue[pymysql.connections.Connection]" = queue.LifoQueue(maxsize=_POOL_MAX_SIZE)
+_pool_lock = threading.Lock()
+_pool_size = 0
 
-@contextmanager
-def get_connection():
-    """Get a MySQL connection context manager."""
-    conn = pymysql.connect(
+
+def _create_connection() -> pymysql.connections.Connection:
+    return pymysql.connect(
         host=settings.MYSQL_HOST,
         port=settings.MYSQL_PORT,
         user=settings.MYSQL_USER,
@@ -29,10 +37,38 @@ def get_connection():
         read_timeout=15,     # Prevent hanging on query results
         write_timeout=15,    # Prevent hanging on query execution
     )
+
+
+@contextmanager
+def get_connection():
+    """Get a pooled MySQL connection context manager."""
+    global _pool_size
+    conn = None
+    try:
+        conn = _pool.get_nowait()
+        conn.ping(reconnect=True)  # Discard stale/dropped connections transparently
+    except queue.Empty:
+        with _pool_lock:
+            _pool_size += 1
+        conn = _create_connection()
+
     try:
         yield conn
-    finally:
-        conn.close()
+    except Exception:
+        # Connection may be in a bad state after an error - don't return it to the pool
+        try:
+            conn.close()
+        finally:
+            with _pool_lock:
+                _pool_size -= 1
+        raise
+    else:
+        try:
+            _pool.put_nowait(conn)
+        except queue.Full:
+            conn.close()
+            with _pool_lock:
+                _pool_size -= 1
 
 
 def get_user_profile(user_id: int) -> dict[str, Any] | None:

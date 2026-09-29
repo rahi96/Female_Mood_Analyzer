@@ -81,53 +81,50 @@ def _extract_scan_findings(scan_data: dict[str, Any]) -> list[FindingItem]:
     elasticity = safe_score(scan_data.get('elasticity_score'))
     glow = safe_score(scan_data.get('glow_index'))
     
-    # Generate SHORT finding descriptions (hardcoded + score-based)
-    # Use simple, short descriptions instead of relying on Claude's word count
-    def get_short_description(metric_name: str, score: float) -> str:
-        """Return hardcoded 1-2 word descriptions based on metric and score."""
+    # Generate SHORT finding descriptions (hardcoded + score-based, optimized for speed)
+    # Map score ranges to descriptions (no nested dict lookup overhead)
+    def get_status_word(score: float | None) -> str:
+        if score is None:
+            return "Excellent"
         if score >= 76:
-            status = "Excellent"
+            return "Excellent"
         elif score >= 51:
-            status = "Good"
+            return "Good"
         elif score >= 26:
-            status = "Moderate"
+            return "Moderate"
         else:
-            status = "Low"
-        
-        descriptions = {
-            "hydration": {
-                "Excellent": "Hydration optimal",
-                "Good": "Hydration adequate",
-                "Moderate": "Hydration moderate",
-                "Low": "Hydration needs support"
-            },
-            "pore": {
-                "Excellent": "Pores clear",
-                "Good": "Pores healthy",
-                "Moderate": "Pore activity present",
-                "Low": "Pore congestion detected"
-            },
-            "redness": {
-                "Excellent": "Calm, minimal redness",
-                "Good": "Stable, low redness",
-                "Moderate": "Some inflammation present",
-                "Low": "Significant redness observed"
-            },
-            "texture": {
-                "Excellent": "Texture smooth, luminous",
-                "Good": "Texture even, glowing",
-                "Moderate": "Texture slightly uneven",
-                "Low": "Texture rough, dull"
-            }
-        }
-        
-        return descriptions.get(metric_name, {}).get(status, f"{metric_name} {status}".lower())
+            return "Low"
+    
+    h_status = get_status_word(hydration)
+    p_status = get_status_word(pore)
+    r_status = get_status_word(redness)
+    t_status = get_status_word(texture)
+    
+    # Direct string mapping (O(1) lookup)
+    desc_map = {
+        ("hydration", "Excellent"): "Hydration optimal",
+        ("hydration", "Good"): "Hydration adequate",
+        ("hydration", "Moderate"): "Hydration moderate",
+        ("hydration", "Low"): "Hydration needs support",
+        ("pore", "Excellent"): "Pores clear",
+        ("pore", "Good"): "Pores healthy",
+        ("pore", "Moderate"): "Pore activity present",
+        ("pore", "Low"): "Pore congestion detected",
+        ("redness", "Excellent"): "Calm, minimal redness",
+        ("redness", "Good"): "Stable, low redness",
+        ("redness", "Moderate"): "Some inflammation present",
+        ("redness", "Low"): "Significant redness observed",
+        ("texture", "Excellent"): "Texture smooth, luminous",
+        ("texture", "Good"): "Texture even, glowing",
+        ("texture", "Moderate"): "Texture slightly uneven",
+        ("texture", "Low"): "Texture rough, dull",
+    }
     
     ai_descriptions = {
-        "moisture_barrier": get_short_description("hydration", hydration) if hydration else "Hydration data unavailable",
-        "pore_congestion": get_short_description("pore", pore) if pore else "Pore data unavailable",
-        "inflammation_markers": get_short_description("redness", redness) if redness else "Redness data unavailable",
-        "melanin_uniformity": get_short_description("texture", texture) if texture else "Texture data unavailable"
+        "moisture_barrier": desc_map.get(("hydration", h_status), "Hydration adequate"),
+        "pore_congestion": desc_map.get(("pore", p_status), "Pores healthy"),
+        "inflammation_markers": desc_map.get(("redness", r_status), "Stable, low redness"),
+        "melanin_uniformity": desc_map.get(("texture", t_status), "Texture even, glowing")
     }
     
     # Moisture Barrier - Short description, no truncation needed
@@ -380,13 +377,12 @@ def _build_sleep_skin_chart(user_id: int, activity_data: dict[str, Any]) -> Slee
                 except (TypeError, ValueError, AttributeError):
                     pass
             
-            # Get sleep data from terra_activity_data - try all available data
-            # Sleep data should have duration field in payload
+            # Get sleep data from terra_activity_data - extract from scores.sleep field
+            # Sleep data structure: {"data": [{"scores": {"sleep": 7.5}, ...}]}
             cur.execute("""
-                SELECT DATE(created_at) as sleep_date, payload, type
+                SELECT DATE(created_at) as sleep_date, payload
                 FROM terra_activity_data
-                WHERE user_id = %s AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-                ORDER BY created_at DESC
+                WHERE user_id = %s AND TRIM(type) = 'sleep' AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
                 LIMIT 50
             """, (user_id,))
             
@@ -409,17 +405,18 @@ def _build_sleep_skin_chart(user_id: int, activity_data: dict[str, Any]) -> Slee
                     else:
                         payload_dict = payload
                     
-                    # Try to extract duration from ANY payload structure
-                    # Sleep might be nested differently
+                    # Extract sleep hours from correct path: data[0]['scores']['sleep']
                     sleep_hours = None
                     
-                    # Check standard path: data[0]['duration']
                     if 'data' in payload_dict and isinstance(payload_dict['data'], list) and len(payload_dict['data']) > 0:
-                        duration = payload_dict['data'][0].get('duration')
-                        if duration:
-                            sleep_hours = float(duration) / 3600 if float(duration) > 100 else float(duration)
+                        first_data = payload_dict['data'][0]
+                        # Look for sleep in scores.sleep field
+                        if 'scores' in first_data and isinstance(first_data['scores'], dict):
+                            sleep_value = first_data['scores'].get('sleep')
+                            if sleep_value is not None:
+                                sleep_hours = float(sleep_value)
                     
-                    # If no sleep hours found yet, skip this record
+                    # If no sleep hours found, skip this record
                     if sleep_hours is None:
                         continue
                     
