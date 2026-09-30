@@ -1,9 +1,12 @@
-"""Perimenopause & Menopause API routes - ONE endpoint for UI page with tabs."""
+"""Perimenopause & Menopause API routes - 3 independent tab endpoints."""
 
 from fastapi import APIRouter, Query
-from typing import Optional
 
-from ai.services.perimenopause_service import get_perimenopause_dashboard
+from ai.services.perimenopause_service import (
+    get_perimenopause_symptoms,
+    get_perimenopause_insights_tab,
+    get_perimenopause_export,
+)
 
 router = APIRouter(
     prefix="/menopause",
@@ -12,16 +15,16 @@ router = APIRouter(
 
 
 # ============================================================================
-# SINGLE ENDPOINT - UNIFIED DASHBOARD (UI shows 3 tabs, 1 data source)
+# TAB 1 - SYMPTOMS (transition stage + vasomotor tracker + GSM health)
 # ============================================================================
 
 @router.get(
-    "/dashboard",
+    "/symptoms",
     response_model=dict,
-    summary="Get complete Perimenopause page data",
-    description="Returns all data for Perimenopause page with tabs: Symptoms, Insights, Export. Frontend handles tab switching."
+    summary="Get Symptoms tab data",
+    description="Transition stage tracker + vasomotor tracker + GSM health. No LLM call - fast."
 )
-async def get_dashboard(
+async def get_symptoms(
     user_id: int = Query(..., gt=0, description="User ID (must be > 0)", example=6),
     period: str = Query(
         "7d",
@@ -31,27 +34,65 @@ async def get_dashboard(
     )
 ):
     """
-    Get complete perimenopause dashboard - serves all 3 UI tabs
-    
-    Returns unified data structure with:
-    - Tab 1 (Symptoms): Vasomotor tracker + GSM health metrics
-    - Tab 2 (Insights): Symptom matrix with correlations + trends  
-    - Tab 3 (Export): Clinical export data + PDF-ready report
-    
-    The frontend handles tab switching by showing/hiding sections.
-    
-    Query Parameters:
-    - user_id: User ID (required)
-    - period: Time period - 7d, 30d, or 90d (default: 7d)
-    
-    Returns:
-    - transition_stage: Menopause stage classification
-    - vasomotor_tracker: Hot flash frequency, severity, triggers, trend
-    - symptom_matrix: Daily symptom heatmap with correlations
-    - gsm_health: Intimate and urinary health metrics
-    - clinical_export: Clinical recommendations and warnings
-    
+    Get Symptoms tab data - transition stage, vasomotor tracker, GSM health.
+
     Example:
-        GET /api/v1/menopause/dashboard?user_id=6&period=7d
+        GET /api/v1/menopause/symptoms?user_id=6&period=7d
     """
-    return get_perimenopause_dashboard(user_id, period)
+    return get_perimenopause_symptoms(user_id, period)
+
+
+# ============================================================================
+# TAB 2 - INSIGHTS (symptom matrix with correlations)
+# ============================================================================
+
+@router.get(
+    "/insights",
+    response_model=dict,
+    summary="Get Insights tab data",
+    description="Symptom matrix with correlations and trends. No LLM call - fast."
+)
+async def get_insights(
+    user_id: int = Query(..., gt=0, description="User ID (must be > 0)", example=6),
+    period: str = Query(
+        "7d",
+        description="Time period",
+        regex="^(7d|30d|90d)$",
+        example="7d"
+    )
+):
+    """
+    Get Insights tab data - symptom matrix with correlations.
+
+    Example:
+        GET /api/v1/menopause/insights?user_id=6&period=7d
+    """
+    return get_perimenopause_insights_tab(user_id, period)
+
+
+# ============================================================================
+# TAB 3 - EXPORT (clinical export, LLM-generated recommendations - slow)
+# ============================================================================
+
+@router.get(
+    "/export",
+    response_model=dict,
+    summary="Get Export tab data",
+    description="Clinical export with LLM-generated recommendations - call only when the user opens this tab or clicks Export PDF, since it's the slow path (Claude call)."
+)
+async def get_export(
+    user_id: int = Query(..., gt=0, description="User ID (must be > 0)", example=6),
+    period: str = Query(
+        "7d",
+        description="Time period",
+        regex="^(7d|30d|90d)$",
+        example="7d"
+    )
+):
+    """
+    Get Export tab data - clinical_export with clinical/lifestyle recommendations.
+
+    Example:
+        GET /api/v1/menopause/export?user_id=6&period=7d
+    """
+    return get_perimenopause_export(user_id, period)
