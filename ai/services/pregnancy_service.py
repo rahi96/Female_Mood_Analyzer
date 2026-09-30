@@ -381,15 +381,24 @@ POSTPARTUM_ACTIVITIES = {
 def pregnancy_summary(user_id: int) -> Dict[str, Any]:
     """Get pregnancy summary for user (or postpartum if already delivered)."""
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey
         
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Check if user exists
+        # Gate on the Pregnancy & Postpartum journey being active for this user -
+        # profiles.life_stage_id and row-presence in user_pregnancies/postpartum_recoveries
+        # are not sufficient on their own (a user can have orphaned rows from a
+        # deactivated journey, or be on multiple simultaneous journeys).
+        journey = get_active_journey(user_id, "Pregnancy & Postpartum")
+        if not journey:
             profile = get_user_profile(user_id)
             if not profile:
                 raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+            raise HTTPException(
+                status_code=404,
+                detail=f"User {user_id} does not have an active Pregnancy & Postpartum journey."
+            )
+        
+        with get_connection() as conn:
+            cursor = conn.cursor()
             
             # PRIORITY 1: Check if user has postpartum data (already delivered)
             cursor.execute("""
@@ -413,20 +422,12 @@ def pregnancy_summary(user_id: int) -> Dict[str, Any]:
                     "pregnancy_completed": True,
                     "delivery_completed": True,
                     "delivery_date": delivery_date.isoformat() if delivery_date else None,
+                    "profile_id": journey["profile_id"],
+                    "journey_id": journey["journey_id"],
+                    "journey_title": journey["journey_title"],
                     "message": "Pregnancy delivery completed. Use /api/v1/postpartum/recovery endpoint for postpartum recovery details.",
                     "redirect_to": "/api/v1/postpartum/recovery"
                 }
-            
-            # PRIORITY 2: Check if user is in pregnancy life stage OR has active pregnancy data
-            # This allows users to access pregnancy data even if life_stage_id hasn't been updated
-            is_pregnant_stage = profile.get("life_stage_id") == 3
-            has_pregnancy_data = _has_pregnancy_data(user_id)
-            
-            if not (is_pregnant_stage or has_pregnancy_data):
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"User {user_id} is not currently pregnant. No active pregnancy cycle found."
-                )
             
             # Try to get active pregnancy from user_pregnancies table (NEW)
             cursor.execute("""
@@ -452,13 +453,25 @@ def pregnancy_summary(user_id: int) -> Dict[str, Any]:
                 pregnancy = cursor.fetchone()
             
             if not pregnancy:
-                return {"is_pregnant": False, "message": "No active pregnancy found"}
+                return {
+                    "is_pregnant": False,
+                    "message": "No active pregnancy found",
+                    "profile_id": journey["profile_id"],
+                    "journey_id": journey["journey_id"],
+                    "journey_title": journey["journey_title"],
+                }
             
             # Use LMP date or conception date to calculate pregnancy start
             pregnancy_start = pregnancy.get("last_menstrual_period_date") or pregnancy.get("conception_date")
             
             if not pregnancy_start:
-                return {"is_pregnant": False, "message": "No pregnancy start date found"}
+                return {
+                    "is_pregnant": False,
+                    "message": "No pregnancy start date found",
+                    "profile_id": journey["profile_id"],
+                    "journey_id": journey["journey_id"],
+                    "journey_title": journey["journey_title"],
+                }
             
             pregnancy_id = pregnancy.get("id")
             due_date = pregnancy.get("due_date")
@@ -605,8 +618,12 @@ def pregnancy_summary(user_id: int) -> Dict[str, Any]:
                 confirmation_message=status_info["confirmation_message"]
             ).model_dump(exclude_none=False)
             
-            # Add phase indicator
+            # Add phase indicator + journey identity for multi-journey correlation
             response["phase"] = "pregnancy"
+            response["profile_id"] = journey["profile_id"]
+            response["journey_id"] = journey["journey_id"]
+            response["journey_title"] = journey["journey_title"]
+            response["pregnancy_id"] = pregnancy_id
             return response
     
     except HTTPException:
@@ -619,21 +636,16 @@ def pregnancy_summary(user_id: int) -> Dict[str, Any]:
 def pregnancy_milestones(user_id: int, week: Optional[int] = None) -> Dict[str, Any]:
     """Get pregnancy milestones for specific week - UI-aligned narrative format."""
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey
         
-        # Check if user exists
-        profile = get_user_profile(user_id)
-        if not profile:
-            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-        
-        # Check if user is in pregnancy life stage OR has active pregnancy data
-        is_pregnant_stage = profile.get("life_stage_id") == 3
-        has_pregnancy_data = _has_pregnancy_data(user_id)
-        
-        if not (is_pregnant_stage or has_pregnancy_data):
+        journey = get_active_journey(user_id, "Pregnancy & Postpartum")
+        if not journey:
+            profile = get_user_profile(user_id)
+            if not profile:
+                raise HTTPException(status_code=404, detail=f"User {user_id} not found")
             raise HTTPException(
-                status_code=404, 
-                detail=f"User {user_id} is not currently pregnant. No active pregnancy cycle found."
+                status_code=404,
+                detail=f"User {user_id} does not have an active Pregnancy & Postpartum journey."
             )
         
         # Get current week if not specified
@@ -662,7 +674,7 @@ def pregnancy_milestones(user_id: int, week: Optional[int] = None) -> Dict[str, 
         # Get next 5 clinical tests (unified response)
         clinical_tests = _get_next_5_clinical_tests(week)
         
-        return PregnancyMilestones(
+        result = PregnancyMilestones(
             week=week,
             trimester=trimester,
             baby_development=data.get("baby", ""),
@@ -672,6 +684,10 @@ def pregnancy_milestones(user_id: int, week: Optional[int] = None) -> Dict[str, 
             clinical_monitoring=clinical_tests,
             clinical_warning_signs=data.get("warning_signs", "")
         ).model_dump(exclude_none=False)
+        result["profile_id"] = journey["profile_id"]
+        result["journey_id"] = journey["journey_id"]
+        result["journey_title"] = journey["journey_title"]
+        return result
     
     except HTTPException:
         raise  # Re-raise HTTPException to propagate to FastAPI
@@ -683,21 +699,16 @@ def pregnancy_milestones(user_id: int, week: Optional[int] = None) -> Dict[str, 
 def pregnancy_clinical_timeline(user_id: int, week: Optional[int] = None) -> Dict[str, Any]:
     """Get all clinical tests across entire pregnancy with dates - UI timeline view."""
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey
         
-        # Check if user exists
-        profile = get_user_profile(user_id)
-        if not profile:
-            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-        
-        # Check if user is in pregnancy life stage OR has active pregnancy data
-        is_pregnant_stage = profile.get("life_stage_id") == 3
-        has_pregnancy_data = _has_pregnancy_data(user_id)
-        
-        if not (is_pregnant_stage or has_pregnancy_data):
+        journey = get_active_journey(user_id, "Pregnancy & Postpartum")
+        if not journey:
+            profile = get_user_profile(user_id)
+            if not profile:
+                raise HTTPException(status_code=404, detail=f"User {user_id} not found")
             raise HTTPException(
-                status_code=404, 
-                detail=f"User {user_id} is not currently pregnant. No active pregnancy cycle found."
+                status_code=404,
+                detail=f"User {user_id} does not have an active Pregnancy & Postpartum journey."
             )
         
         # Get current week if not specified
@@ -731,7 +742,10 @@ def pregnancy_clinical_timeline(user_id: int, week: Optional[int] = None) -> Dic
             "week": week,
             "trimester": trimester,
             "clinical_monitoring": clinical_tests,
-            "clinical_warning_signs": warning_signs
+            "clinical_warning_signs": warning_signs,
+            "profile_id": journey["profile_id"],
+            "journey_id": journey["journey_id"],
+            "journey_title": journey["journey_title"],
         }
     
     except HTTPException:
@@ -744,26 +758,23 @@ def pregnancy_clinical_timeline(user_id: int, week: Optional[int] = None) -> Dic
 def postpartum_recovery(user_id: int) -> Dict[str, Any]:
     """Get postpartum recovery overview."""
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey
         
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Check if user exists
+        # Gate on the Pregnancy & Postpartum journey being active - row presence in
+        # postpartum_recoveries/menstrual_cycles alone is not sufficient (orphaned
+        # data from a deactivated journey must not be surfaced).
+        journey = get_active_journey(user_id, "Pregnancy & Postpartum")
+        if not journey:
             profile = get_user_profile(user_id)
             if not profile:
                 raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-            
-            # Check if user is in postpartum life stage OR has completed pregnancy data
-            # This allows users to access postpartum data even if life_stage_id hasn't been updated
-            is_postpartum_stage = profile.get("life_stage_id") == 4
-            has_postpartum_data = _has_postpartum_data(user_id)
-            
-            if not (is_postpartum_stage or has_postpartum_data):
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"User {user_id} is not postpartum. No completed pregnancy found."
-                )
+            raise HTTPException(
+                status_code=404,
+                detail=f"User {user_id} does not have an active Pregnancy & Postpartum journey."
+            )
+        
+        with get_connection() as conn:
+            cursor = conn.cursor()
             
             # Try to get postpartum data from NEW postpartum_recoveries table
             cursor.execute("""
@@ -801,7 +812,10 @@ def postpartum_recovery(user_id: int) -> Dict[str, Any]:
                         "activity_level": "Consult doctor",
                         "alerts": [],
                         "next_follow_up": None,
-                        "message": "No completed pregnancy found"
+                        "message": "No completed pregnancy found",
+                        "profile_id": journey["profile_id"],
+                        "journey_id": journey["journey_id"],
+                        "journey_title": journey["journey_title"],
                     }
                 
                 delivery_date = cycle.get("delivery_date")
@@ -809,14 +823,16 @@ def postpartum_recovery(user_id: int) -> Dict[str, Any]:
             postpartum_week = (current_date - delivery_date).days // 7
             postpartum_week = max(0, min(12, postpartum_week))
             
-            # Fetch health logs for postpartum data
+            # Bound the window to this delivery's 12-week postpartum period so logs from a
+            # subsequent pregnancy/delivery can't leak into this journey's recovery metrics.
+            window_end = delivery_date + timedelta(weeks=12)
             cursor.execute("""
                 SELECT mood, energy_level, symptoms, notes, log_date
                 FROM health_logs
-                WHERE user_id = %s AND log_date >= %s
+                WHERE user_id = %s AND log_date >= %s AND log_date <= %s
                 ORDER BY log_date DESC
                 LIMIT 14
-            """, (user_id, delivery_date))
+            """, (user_id, delivery_date, window_end))
             health_logs = cursor.fetchall()
             
             # Calculate recovery metrics from health logs
@@ -855,6 +871,9 @@ def postpartum_recovery(user_id: int) -> Dict[str, Any]:
             
             return {
                 "phase": "postpartum",
+                "profile_id": journey["profile_id"],
+                "journey_id": journey["journey_id"],
+                "journey_title": journey["journey_title"],
                 "delivery_date": delivery_date.isoformat(),
                 "days_postpartum": days_postpartum,
                 "postpartum_week": postpartum_week,
@@ -1445,11 +1464,17 @@ def _determine_user_phase(user_id: int) -> tuple[str, dict]:
     Uses existing helper functions for consistency.
     """
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey
         
         profile = get_user_profile(user_id)
         if not profile:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+        
+        # Gate on the Pregnancy & Postpartum journey being active - without this,
+        # orphaned rows in postpartum_recoveries/user_pregnancies from a deactivated
+        # or never-linked journey get surfaced as if the journey were live.
+        if not get_active_journey(user_id, "Pregnancy & Postpartum"):
+            return ("unknown", {})
         
         with get_connection() as conn:
             cursor = conn.cursor()
@@ -2071,7 +2096,7 @@ def support_insights(user_id: int) -> Dict[str, Any]:
     try:
         from ai.utils.db import get_connection, get_user_profile
         
-        # Determine user's phase
+        # Determine user's phase (already gates on the active journey internally)
         phase, phase_data = _determine_user_phase(user_id)
         
         if phase == "unknown":
@@ -2080,10 +2105,19 @@ def support_insights(user_id: int) -> Dict[str, Any]:
                 detail=f"User {user_id} is not currently in a tracked pregnancy or postpartum phase."
             )
         
+        from ai.utils.db import get_active_journey
+        journey = get_active_journey(user_id, "Pregnancy & Postpartum")
+        
         # Get current date for calculations
         current_date = date.today()
         insights = []
-        meta_data = {"user_id": user_id, "phase": phase}
+        meta_data = {
+            "user_id": user_id,
+            "phase": phase,
+            "profile_id": journey["profile_id"] if journey else None,
+            "journey_id": journey["journey_id"] if journey else None,
+            "journey_title": journey["journey_title"] if journey else None,
+        }
         
         # ===== PREGNANCY PHASE =====
         if phase == "pregnancy":

@@ -87,6 +87,35 @@ def get_user_profile(user_id: int) -> dict[str, Any] | None:
         return cursor.fetchone()
 
 
+def get_active_journey(user_id: int, journey_title: str) -> dict[str, Any] | None:
+    """Resolve a user's profile_id/journey_id for a named journey via life_journey_profile.
+
+    This is the multi-journey source of truth (a profile can have several
+    active journeys at once, e.g. Beauty + Pregnancy + Lifelong Thriving).
+    profiles.life_stage_id is a single legacy scalar and cannot represent
+    that, so journey-specific endpoints (pregnancy, postpartum, perimenopause,
+    etc.) must gate on this join instead of on life_stage_id or on the mere
+    presence of rows in their own data tables.
+
+    Returns {profile_id, journey_id, journey_title} or None if the journey
+    is not active for this user.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT p.id AS profile_id, lj.id AS journey_id, lj.title AS journey_title
+            FROM profiles p
+            JOIN life_journey_profile ljp ON ljp.profile_id = p.id
+            JOIN life_journeys lj ON lj.id = ljp.life_journey_id
+            WHERE p.user_id = %s AND lj.title = %s
+            LIMIT 1
+            """,
+            (user_id, journey_title),
+        )
+        return cursor.fetchone()
+
+
 def get_current_cycle(user_id: int) -> dict[str, Any] | None:
     """Fetch current (incomplete) menstrual cycle for user."""
     with get_connection() as conn:
