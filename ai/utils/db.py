@@ -116,6 +116,33 @@ def get_active_journey(user_id: int, journey_title: str) -> dict[str, Any] | Non
         return cursor.fetchone()
 
 
+def get_active_journey_by_ids(user_id: int, journey_ids: list[int]) -> dict[str, Any] | None:
+    """Same as get_active_journey but matches on journey id instead of title.
+
+    Use this when the same real-world journey is represented by more than one
+    life_journeys row (e.g. duplicate/legacy title variants) so callers don't
+    have to pick a single title string and risk missing users linked to the
+    other variant.
+    """
+    if not journey_ids:
+        return None
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        placeholders = ",".join(["%s"] * len(journey_ids))
+        cursor.execute(
+            f"""
+            SELECT p.id AS profile_id, lj.id AS journey_id, lj.title AS journey_title
+            FROM profiles p
+            JOIN life_journey_profile ljp ON ljp.profile_id = p.id
+            JOIN life_journeys lj ON lj.id = ljp.life_journey_id
+            WHERE p.user_id = %s AND lj.id IN ({placeholders})
+            LIMIT 1
+            """,
+            (user_id, *journey_ids),
+        )
+        return cursor.fetchone()
+
+
 def get_current_cycle(user_id: int) -> dict[str, Any] | None:
     """Fetch current (incomplete) menstrual cycle for user."""
     with get_connection() as conn:

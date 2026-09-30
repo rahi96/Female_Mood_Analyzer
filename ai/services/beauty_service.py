@@ -8,7 +8,10 @@ from ai.models.beauty_models import (
     SleepSkinData, CyclePhases, Correlations, AIInsights, PhaseData
 )
 from ai.utils.claude_llm import ClaudeLLM
-from ai.utils.db import get_connection
+from ai.utils.db import get_connection, get_active_journey
+
+# Beauty & Radiance journey id in life_journeys - see get_active_journey usage below.
+BEAUTY_JOURNEY_TITLE = "Beauty & Radiance"
 
 
 BEAUTY_SYSTEM_PROMPT = """You are a beauty & skincare AI assistant for a women's wellness app.
@@ -491,6 +494,14 @@ def get_beauty_overview(request: BeautyRequest) -> BeautyResponse:
     try:
         user_id = request.user_id
         days = request.days or 30
+        
+        # Gate on the Beauty & Radiance journey being active for this user -
+        # previously this endpoint queried skin_scans/terra_activity_data by
+        # user_id alone, so orphaned/stale scan data would be returned even
+        # if the user isn't currently on the Beauty journey.
+        journey = get_active_journey(user_id, BEAUTY_JOURNEY_TITLE)
+        if not journey:
+            raise ValueError(f"User {user_id} does not have an active {BEAUTY_JOURNEY_TITLE} journey.")
         
         # Fetch skin scans data
         today_skin = _fetch_latest_skin_scan(user_id)
