@@ -36,6 +36,13 @@ def _create_connection() -> pymysql.connections.Connection:
         connect_timeout=10,  # Prevent indefinite hanging on connection
         read_timeout=15,     # Prevent hanging on query results
         write_timeout=15,    # Prevent hanging on query execution
+        # Without this, PyMySQL defaults to autocommit=False, so a pooled
+        # connection holds a REPEATABLE READ snapshot from its first query
+        # and never sees rows committed by other connections afterward
+        # (e.g. a user created by backend after this connection's snapshot) -
+        # this is a read-only reporting workload, so there's no transaction
+        # to hold open.
+        autocommit=True,
     )
 
 
