@@ -10,6 +10,12 @@ from ai.models.perimenopause_models import (
     SymptomEntry, ClinicalExport, PerimenopauseInsights
 )
 
+# life_journeys has two duplicate rows for the same real-world journey
+# (id=4 "Peri / Menopause & Vitality", id=7 "Perimenopause/Menopause &
+# Vitality") - gate on both ids instead of a single title so users linked to
+# either variant are treated as having an active perimenopause journey.
+PERIMENOPAUSE_JOURNEY_IDS = [4, 7]
+
 
 # ============================================================================
 # HARDCODED CLINICAL DATA - ACOG Guidelines
@@ -114,13 +120,17 @@ def _normalize_symptoms(symptoms: Any) -> Dict[str, Any]:
 # MAIN API FUNCTIONS
 # ============================================================================
 
-def _empty_dashboard(user_id: int, period: str) -> Dict[str, Any]:
+def _empty_dashboard(user_id: int, period: str, journey_active: bool = False, message: Optional[str] = None) -> Dict[str, Any]:
     """Honest empty-state dashboard for users with no data (or who don't exist yet).
 
     Matches the same top-level shape the UI always expects, instead of an
     ad-hoc {"status": "error", ...} dict that omits every field the frontend
     depends on (transition_stage_tracker, vasomotor_tracker, etc.) and would
     otherwise be returned with a misleading HTTP 200.
+
+    journey_active distinguishes "no active Perimenopause/Menopause journey"
+    from "journey active but no data logged yet" - both produce this same
+    zeroed-out shape otherwise, which a caller can't tell apart.
     """
     return {
         "transition_stage_tracker": {
@@ -136,71 +146,67 @@ def _empty_dashboard(user_id: int, period: str) -> Dict[str, Any]:
         "clinical_export": None,
         "period_selected": period,
         "tabs": ["Symptoms", "Insights", "Export"],
+        "journey_active": journey_active,
+        "message": message,
     }
 
 
-def get_perimenopause_dashboard(user_id: int, period: str = "7d") -> Dict[str, Any]:
+def _fetch_period_health_logs(user_id: int, period: str) -> tuple:
+    """Fetch health_logs for a period, extending start_date back to the first
+    log if the user's earliest entry predates the nominal period window.
+    Returns (health_logs, start_date, end_date).
     """
-    Get complete perimenopause dashboard - UNIFIED endpoint for UI page with 3 tabs.
-    
-    Returns all data needed for:
-    - Tab 1 (Symptoms): Vasomotor tracker + GSM health
-    - Tab 2 (Insights): Symptom matrix with correlations
-    - Tab 3 (Export): Clinical export data
-    
-    Frontend handles tab switching by showing/hiding sections.
+    from ai.utils.db import get_connection
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        end_date = date.today()
+        start_date = end_date - timedelta(days={"7d": 7, "30d": 30, "90d": 90}.get(period, 7))
+
+        cursor.execute("""
+            SELECT log_date FROM health_logs
+            WHERE user_id = %s AND log_date >= %s
+            ORDER BY log_date ASC LIMIT 1
+        """, (user_id, start_date))
+        first_log = cursor.fetchone()
+        if first_log and first_log.get("log_date"):
+            start_date = first_log.get("log_date")
+
+        cursor.execute("""
+            SELECT log_date, mood, energy_level, symptoms, notes
+            FROM health_logs
+            WHERE user_id = %s AND log_date >= %s AND log_date <= %s
+            ORDER BY log_date ASC
+        """, (user_id, start_date, end_date))
+        health_logs = cursor.fetchall()
+
+    return health_logs, start_date, end_date
+
+
+def get_perimenopause_symptoms(user_id: int, period: str = "7d") -> Dict[str, Any]:
+    """
+    Get Symptoms tab data only - transition stage + vasomotor tracker + GSM health.
+
+    No LLM call - pure DB + Python, fast path for the default/most-viewed tab.
     """
     try:
-        # Get all three data sections
         summary = get_menopause_summary(user_id)
         if summary.get("status") == "error":
-            # User doesn't exist or has no profile yet - return an honest empty
-            # dashboard with the correct shape instead of a raw error dict that
-            # silently omits every field the UI expects.
-            return _empty_dashboard(user_id, period)
-        
-        # Get insights (vasomotor + symptoms matrix)
-        insights = get_perimenopause_insights(user_id, period, include=["vasomotor", "symptoms"])
-        if insights.get("status") == "error":
-            return _empty_dashboard(user_id, period)
-        
-        # Get clinical export data (for Export tab)
-        from ai.utils.db import get_connection
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Get start/end dates for clinical export
-            end_date = date.today()
-            start_date = end_date - timedelta(days={"7d": 7, "30d": 30, "90d": 90}.get(period, 7))
-            
-            cursor.execute("""
-                SELECT log_date FROM health_logs
-                WHERE user_id = %s AND log_date >= %s
-                ORDER BY log_date ASC LIMIT 1
-            """, (user_id, start_date))
-            first_log = cursor.fetchone()
-            if first_log and first_log.get("log_date"):
-                start_date = first_log.get("log_date")
-            
-            # Fetch all health_logs for this period (needed for GSM health calculation)
-            cursor.execute("""
-                SELECT log_date, mood, energy_level, symptoms, notes
-                FROM health_logs
-                WHERE user_id = %s AND log_date >= %s AND log_date <= %s
-                ORDER BY log_date ASC
-            """, (user_id, start_date, end_date))
-            health_logs = cursor.fetchall()
-        
-        # Ensure start_date is not None before calling isoformat()
-        start_date_str = start_date.isoformat() if start_date else date.today().isoformat()
-        end_date_str = end_date.isoformat()
-        clinical_export = get_clinical_export(user_id, start_date_str, end_date_str)
-        if clinical_export.get("status") == "error":
-            clinical_export = None
-        
-        # Combine everything into one dashboard response
-        dashboard = {
-            # Tab 1: Symptoms (Vasomotor Tracker + GSM Health)
+            empty = _empty_dashboard(user_id, period, journey_active=False, message=summary.get("message"))
+            return {
+                "transition_stage_tracker": empty["transition_stage_tracker"],
+                "vasomotor_tracker": empty["vasomotor_tracker"],
+                "gsm_health": empty["gsm_health"],
+                "period_selected": period,
+                "tabs": ["Symptoms"],
+                "journey_active": False,
+                "message": summary.get("message"),
+            }
+
+        health_logs, start_date, end_date = _fetch_period_health_logs(user_id, period)
+        vasomotor_tracker = _build_vasomotor_tracker(health_logs, period, start_date, end_date)
+
+        return {
             "transition_stage_tracker": {
                 "menopause_stage": summary.get("menopause_stage"),
                 "is_in_perimenopause": summary.get("is_in_perimenopause"),
@@ -208,46 +214,81 @@ def get_perimenopause_dashboard(user_id: int, period: str = "7d") -> Dict[str, A
                 "last_period_date": summary.get("last_period_date"),
                 "cycle_status": summary.get("cycle_status")
             },
-            
-            # Tab 1: Vasomotor Tracker
-            "vasomotor_tracker": insights.get("vasomotor_tracker"),
-            
-            # Tab 1: GSM Health (Intimate & Urinary Health) - calculated from user data
-            "gsm_health": _calculate_gsm_health([
-                log for log in health_logs 
-                if start_date <= log.get("log_date") <= end_date
-            ]),
-            
-            # Tab 2: Symptom Matrix with Correlations
-            "symptom_matrix": insights.get("symptom_matrix"),
-            
-            # Tab 3: Clinical Export Data
-            "clinical_export": clinical_export,
-            
-            # Metadata
+            "vasomotor_tracker": vasomotor_tracker,
+            "gsm_health": _calculate_gsm_health(health_logs),
             "period_selected": period,
-            "tabs": ["Symptoms", "Insights", "Export"]
+            "tabs": ["Symptoms"],
+            "journey_active": True,
+            "message": None,
         }
-        
-        return dashboard
-    
+
     except Exception as e:
-        print(f"[ERROR] get_perimenopause_dashboard failed for user {user_id}: {e}")
+        print(f"[ERROR] get_perimenopause_symptoms failed for user {user_id}: {e}")
         return {"status": "error", "message": str(e), "user_id": user_id}
+
+
+def get_perimenopause_insights_tab(user_id: int, period: str = "7d") -> Dict[str, Any]:
+    """
+    Get Insights tab data only - symptom matrix with correlations.
+
+    No LLM call - pure DB + Python, kept separate from Export so opening
+    Insights never pays for the Export tab's clinical_export LLM latency.
+    """
+    try:
+        summary = get_menopause_summary(user_id)
+        if summary.get("status") == "error":
+            empty_matrix = _build_symptom_matrix([], period, date.today(), date.today())
+            return {
+                "symptom_matrix": empty_matrix,
+                "period_selected": period,
+                "tabs": ["Insights"],
+                "journey_active": False,
+                "message": summary.get("message"),
+            }
+
+        health_logs, start_date, end_date = _fetch_period_health_logs(user_id, period)
+        symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date)
+
+        return {
+            "symptom_matrix": symptom_matrix,
+            "period_selected": period,
+            "tabs": ["Insights"],
+            "journey_active": True,
+            "message": None,
+        }
+
+    except Exception as e:
+        print(f"[ERROR] get_perimenopause_insights_tab failed for user {user_id}: {e}")
+        return {"status": "error", "message": str(e), "user_id": user_id}
+
+
+
 
 
 def get_menopause_summary(user_id: int) -> Dict[str, Any]:
     """Get quick menopause status overview - UI Dashboard view."""
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey_by_ids
+        
+        # Gate on the Perimenopause/Menopause journey being active for this
+        # user - previously this endpoint only checked that the user exists,
+        # so any user with menstrual_cycles/health_logs rows (e.g. someone on
+        # the Cycle & Fertility journey) could get perimenopause staging that
+        # doesn't apply to them.
+        journey = get_active_journey_by_ids(user_id, PERIMENOPAUSE_JOURNEY_IDS)
+        if not journey:
+            profile = get_user_profile(user_id)
+            if not profile:
+                return {"status": "error", "message": "User not found"}
+            return {
+                "status": "error",
+                "message": f"User {user_id} does not have an active Perimenopause/Menopause journey.",
+            }
         
         with get_connection() as conn:
             cursor = conn.cursor()
             
-            # Verify user is in perimenopause life stage
             profile = get_user_profile(user_id)
-            if not profile:
-                return {"status": "error", "message": "User not found"}
             
             # Get menstrual cycle data
             cursor.execute("""
@@ -331,7 +372,7 @@ def get_menopause_summary(user_id: int) -> Dict[str, Any]:
             else:
                 overall_severity = "mild"
             
-            return MenopauseSummary(
+            result = MenopauseSummary(
                 is_in_perimenopause=menopause_stage == "perimenopause",
                 menopause_stage=menopause_stage,
                 months_since_last_period=months_since_last_period,
@@ -347,6 +388,10 @@ def get_menopause_summary(user_id: int) -> Dict[str, Any]:
                 active_alerts=alerts,
                 recommended_actions=_get_recommendations(menopause_stage, primary_symptoms)
             ).model_dump(exclude_none=False)
+            result["profile_id"] = journey["profile_id"]
+            result["journey_id"] = journey["journey_id"]
+            result["journey_title"] = journey["journey_title"]
+            return result
     
     except Exception as e:
         print(f"[ERROR] get_menopause_summary failed for user {user_id}: {e}")
@@ -414,6 +459,34 @@ def get_perimenopause_insights(
         return {"status": "error", "message": str(e), "user_id": user_id}
 
 
+def get_perimenopause_export(user_id: int, period: str = "7d") -> Dict[str, Any]:
+    """
+    Get Export tab data only - clinical_export with LLM-generated recommendations.
+
+    period-based wrapper around get_clinical_export, matching the signature of
+    get_perimenopause_symptoms/get_perimenopause_insights_tab so all 3 tabs
+    can be called independently. This is the only one of the 3 tab endpoints
+    that makes an LLM call, so it should be requested on-demand (tab opened /
+    Export button clicked), not on every dashboard load.
+    """
+    end_date = date.today()
+    start_date = end_date - timedelta(days={"7d": 7, "30d": 30, "90d": 90}.get(period, 7))
+    result = get_clinical_export(user_id, start_date.isoformat(), end_date.isoformat())
+    if result.get("status") == "error":
+        return {
+            "clinical_export": None,
+            "tabs": ["Export"],
+            "journey_active": False,
+            "message": result.get("message"),
+        }
+    return {
+        "clinical_export": result,
+        "tabs": ["Export"],
+        "journey_active": True,
+        "message": None,
+    }
+
+
 def get_clinical_export(
     user_id: int,
     start_date: str,
@@ -421,8 +494,15 @@ def get_clinical_export(
 ) -> Dict[str, Any]:
     """Get clinical export ready for sharing with healthcare provider."""
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey_by_ids
         from ai.utils.llm_call import llm_call
+        
+        journey = get_active_journey_by_ids(user_id, PERIMENOPAUSE_JOURNEY_IDS)
+        if not journey:
+            return {
+                "status": "error",
+                "message": f"User {user_id} does not have an active Perimenopause/Menopause journey.",
+            }
         
         with get_connection() as conn:
             cursor = conn.cursor()
@@ -574,7 +654,7 @@ Format as bullet points.
                 "Lipid panel"
             ]
             
-            return ClinicalExport(
+            result = ClinicalExport(
                 export_date=datetime.now().strftime("%b %d, %Y"),
                 period_covered=f"{start.strftime('%b %d')} - {end.strftime('%b %d, %Y')}",
                 menopause_stage=menopause_stage,
@@ -602,6 +682,10 @@ Format as bullet points.
                 data_points_collected=len(health_logs),
                 data_completeness_percent=min(100, int((len(health_logs) / max(1, (end - start).days)) * 100))
             ).model_dump(exclude_none=False)
+            result["profile_id"] = journey["profile_id"]
+            result["journey_id"] = journey["journey_id"]
+            result["journey_title"] = journey["journey_title"]
+            return result
     
     except Exception as e:
         print(f"[ERROR] get_clinical_export failed for user {user_id}: {e}")

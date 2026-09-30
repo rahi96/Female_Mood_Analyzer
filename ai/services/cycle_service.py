@@ -18,10 +18,13 @@ from ai.models.cycle_models import (
 )
 from ai.services.cycle_engine_v1_service import _hormone_trends_from_mucus
 from ai.utils.claude_llm import ClaudeLLM
-from ai.utils.db import get_connection
+from ai.utils.db import get_connection, get_active_journey
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Cycle & Fertility journey title in life_journeys - see get_active_journey usage below.
+CYCLE_JOURNEY_TITLE = "Cycle & Fertility"
 
 # Constants
 CYCLE_PHASE_MAP = {
@@ -83,6 +86,14 @@ def get_cycle_overview(user_id: int, mode: str = "standard", include_bbt: bool =
         if not _user_exists(user_id):
             logger.warning(f"User {user_id} not found")
             raise ValueError(f"User {user_id} not found")
+        
+        # Gate on the Cycle & Fertility journey being active for this user -
+        # previously only user existence was checked, so any user with rows
+        # in menstrual_cycles/bbt_logs (e.g. leftover from a deactivated or
+        # switched journey) could get cycle/fertility data regardless.
+        journey = get_active_journey(user_id, CYCLE_JOURNEY_TITLE)
+        if not journey:
+            raise ValueError(f"User {user_id} does not have an active {CYCLE_JOURNEY_TITLE} journey.")
         
         # Fetch cycle data
         current_cycle = _fetch_current_cycle(user_id)

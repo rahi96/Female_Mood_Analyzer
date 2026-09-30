@@ -98,13 +98,10 @@ class VitalityService:
                     continue
             
             if not result or not created_at:
-                logger.warning(f"   ⚠️  Could not verify user {self.user_id} eligibility - proceeding with caution")
-                # For testing: allow to proceed but log warning
-                # In production, this would return False
-                if not USE_MOCK_DATA:
-                    logger.warning(f"   ℹ️  Skipping eligibility check - assuming user is eligible")
-                    return True, "Eligibility check skipped"
-                return False, f"User {self.user_id} not found"
+                # Fail closed - a missing/unreadable created_at must not grant
+                # access, otherwise the account-age gate is bypassed entirely.
+                logger.warning(f"   ⚠️  Could not verify user {self.user_id} eligibility - denying access")
+                return False, f"User {self.user_id} not found or account age could not be verified"
             
             # Check if account is old enough (30 days for testing)
             threshold_date = datetime.now() - timedelta(days=self.ELIGIBILITY_DAYS_THRESHOLD)
@@ -122,8 +119,8 @@ class VitalityService:
             
         except Exception as e:
             logger.error(f"Error checking user eligibility: {e}")
-            # Fail open - allow access if check fails
-            return True, f"Eligibility check skipped: {str(e)}"
+            # Fail closed - a broken eligibility check must not grant access.
+            return False, f"Eligibility check failed: {str(e)}"
     
     def _calculate_data_completeness(self, user_data: Dict) -> float:
         """
@@ -164,7 +161,7 @@ class VitalityService:
             is_eligible, eligibility_message = self._check_user_eligibility()
             if not is_eligible:
                 logger.warning(f"User {self.user_id} ineligible: {eligibility_message}")
-                raise ValueError(eligibility_message)
+                return self._get_fallback_vitality_response("ineligible", eligibility_message)
             
             logger.info(f"🟢 [2/8] Fetching health data for user {self.user_id}")
             # Fetch all user health data
@@ -273,7 +270,7 @@ class VitalityService:
             print(traceback.format_exc())
             print(f"[VITALITY] [FALLBACK] Returning fallback response")
             # Return fallback response
-            return self._get_fallback_vitality_response()
+            return self._get_fallback_vitality_response("check_failed", str(e))
     
     def _fetch_user_health_data(self) -> Dict[str, Any]:
         """Fetch all health data for vitality calculation."""
@@ -1100,15 +1097,20 @@ Format your response as JSON with keys: summary, strengths, areas_to_focus, reco
         
         return recs[:3]
     
-    def _get_fallback_vitality_response(self) -> VitalityResponse:
-        """Return fallback response on error."""
+    def _get_fallback_vitality_response(self, eligibility_status: str = "check_failed", message: Optional[str] = None) -> VitalityResponse:
+        """Return fallback response on ineligibility or error - must carry the
+        real eligibility_status/message rather than the model's "eligible"
+        default, otherwise callers can't tell this apart from a real result.
+        """
         return VitalityResponse(
-            vitality_index=70,
-            vitality_level="Strong",
-            personal_best="Maintaining good health",
+            vitality_index=0,
+            vitality_level="Unknown",
+            personal_best=message or "Unable to calculate vitality at this time",
             trend_6_years=[],
             dimensions=[],
-            ai_insights=None
+            ai_insights=None,
+            eligibility_status=eligibility_status,
+            data_completeness=0.0
         )
 
 
@@ -1838,8 +1840,10 @@ class LifeArcService:
         milestones = []
         
         try:
-            # Schema: profiles.user_id + profiles.life_stage_id → life_journeys.id
-            # Get user's profile(s) with life stage reference
+            # Schema: profiles.id -> life_journey_profile.profile_id -> life_journeys.id.
+            # This is the current source of truth for active journeys (a profile can
+            # have several at once); the legacy profiles.life_stage_id scalar can be
+            # stale/out of sync with it, so it must not be used here.
             # NOTE: Get ALL life stages assigned to user (no date filter - assignment may predate cutoff)
             logger.info(f"[LIFE_ARC_DEBUG] life_stage detection: Querying for user_id={self.user_id}")
             
@@ -1847,8 +1851,9 @@ class LifeArcService:
                 SELECT p.id, p.created_at, p.updated_at, lj.id as journey_id, lj.icon, lj.title, 
                        lj.subtitle, lj.description, lj.status, lj.created_at as journey_created_at
                 FROM profiles p
-                LEFT JOIN life_journeys lj ON p.life_stage_id = lj.id
-                WHERE p.user_id = %s AND p.life_stage_id IS NOT NULL
+                JOIN life_journey_profile ljp ON ljp.profile_id = p.id
+                JOIN life_journeys lj ON lj.id = ljp.life_journey_id
+                WHERE p.user_id = %s
                 ORDER BY COALESCE(lj.created_at, p.updated_at) DESC
                 LIMIT 20
             """
