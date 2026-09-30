@@ -22,7 +22,7 @@ router = APIRouter(
     description="Returns all data for Perimenopause page with tabs: Symptoms, Insights, Export. Frontend handles tab switching."
 )
 async def get_dashboard(
-    user_id: int = Query(..., description="User ID", example=6),
+    user_id: int = Query(..., gt=0, description="User ID (must be > 0)", example=6),
     period: str = Query(
         "7d",
         description="Time period",

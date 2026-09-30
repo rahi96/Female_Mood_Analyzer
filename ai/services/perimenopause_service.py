@@ -46,6 +46,12 @@ TRIGGER_KEYWORDS = {
 
 SYMPTOM_SEVERITY_MAP = {"none": 0, "mild": 1, "moderate": 2, "severe": 3}
 
+# Mood values are stored as emoji in health_logs.mood; map known emoji to a 1-10 score.
+# Unseen emoji fall back to a neutral score rather than crashing or defaulting to "sad".
+MOOD_EMOJI_SCORES = {
+    "😊": 8, "🙂": 6, "😐": 5, "🙁": 3, "😢": 2, "😡": 2,
+}
+
 
 # ============================================================================
 # HELPER FUNCTIONS - Symptom Parsing
@@ -108,6 +114,31 @@ def _normalize_symptoms(symptoms: Any) -> Dict[str, Any]:
 # MAIN API FUNCTIONS
 # ============================================================================
 
+def _empty_dashboard(user_id: int, period: str) -> Dict[str, Any]:
+    """Honest empty-state dashboard for users with no data (or who don't exist yet).
+
+    Matches the same top-level shape the UI always expects, instead of an
+    ad-hoc {"status": "error", ...} dict that omits every field the frontend
+    depends on (transition_stage_tracker, vasomotor_tracker, etc.) and would
+    otherwise be returned with a misleading HTTP 200.
+    """
+    return {
+        "transition_stage_tracker": {
+            "menopause_stage": "unknown",
+            "is_in_perimenopause": False,
+            "months_since_last_period": None,
+            "last_period_date": None,
+            "cycle_status": "absent",
+        },
+        "vasomotor_tracker": _build_vasomotor_tracker([], period, date.today(), date.today()),
+        "gsm_health": _calculate_gsm_health([]),
+        "symptom_matrix": _build_symptom_matrix([], period, date.today(), date.today()),
+        "clinical_export": None,
+        "period_selected": period,
+        "tabs": ["Symptoms", "Insights", "Export"],
+    }
+
+
 def get_perimenopause_dashboard(user_id: int, period: str = "7d") -> Dict[str, Any]:
     """
     Get complete perimenopause dashboard - UNIFIED endpoint for UI page with 3 tabs.
@@ -123,12 +154,15 @@ def get_perimenopause_dashboard(user_id: int, period: str = "7d") -> Dict[str, A
         # Get all three data sections
         summary = get_menopause_summary(user_id)
         if summary.get("status") == "error":
-            return summary
+            # User doesn't exist or has no profile yet - return an honest empty
+            # dashboard with the correct shape instead of a raw error dict that
+            # silently omits every field the UI expects.
+            return _empty_dashboard(user_id, period)
         
         # Get insights (vasomotor + symptoms matrix)
         insights = get_perimenopause_insights(user_id, period, include=["vasomotor", "symptoms"])
         if insights.get("status") == "error":
-            return insights
+            return _empty_dashboard(user_id, period)
         
         # Get clinical export data (for Export tab)
         from ai.utils.db import get_connection
@@ -234,8 +268,23 @@ def get_menopause_summary(user_id: int) -> Dict[str, Any]:
             """, (user_id,))
             health_logs = cursor.fetchall()
             
+            # Wider window for symptom-cluster assessment - staging should
+            # look at a recent pattern, not just the last 7 days used for the
+            # daily-average metrics below.
+            cursor.execute("""
+                SELECT symptoms
+                FROM health_logs
+                WHERE user_id = %s AND log_date >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+            """, (user_id,))
+            symptom_window_logs = cursor.fetchall()
+            supporting_symptom_count = _count_supporting_symptoms(symptom_window_logs)
+            
+            user_age = profile.get("age")
+            
             # Determine menopause stage
-            menopause_stage, months_since_last_period = _determine_menopause_stage(cycles)
+            menopause_stage, months_since_last_period = _determine_menopause_stage(
+                cycles, age=user_age, supporting_symptom_count=supporting_symptom_count
+            )
             
             # Parse vasomotor events from last 7 days
             hot_flash_count = 0
@@ -253,11 +302,11 @@ def get_menopause_summary(user_id: int) -> Dict[str, Any]:
             # Parse symptoms
             primary_symptoms = _extract_top_symptoms(health_logs)
             
-            # Calculate mood stability
+            # Calculate mood stability (mood is stored as emoji, not English words)
             moods = []
             for log in health_logs:
                 if log.get("mood"):
-                    mood_score = {"happy": 8, "neutral": 5, "sad": 2, "anxious": 3, "irritable": 2}.get(log.get("mood"), 5)
+                    mood_score = MOOD_EMOJI_SCORES.get(log.get("mood"), 5)
                     moods.append(mood_score)
             mood_stability = int((sum(moods) / len(moods) / 10 * 100)) if moods else 50
             
@@ -372,7 +421,7 @@ def get_clinical_export(
 ) -> Dict[str, Any]:
     """Get clinical export ready for sharing with healthcare provider."""
     try:
-        from ai.utils.db import get_connection
+        from ai.utils.db import get_connection, get_user_profile
         from ai.utils.llm_call import llm_call
         
         with get_connection() as conn:
@@ -401,8 +450,27 @@ def get_clinical_export(
             """, (user_id,))
             cycles = cursor.fetchall()
             
+            profile = get_user_profile(user_id)
+            user_age = profile.get("age") if profile else None
+            supporting_symptom_count = _count_supporting_symptoms(health_logs)
+            
             # Determine stage
-            menopause_stage, months_since_last = _determine_menopause_stage(cycles)
+            menopause_stage, months_since_last = _determine_menopause_stage(
+                cycles, age=user_age, supporting_symptom_count=supporting_symptom_count
+            )
+            
+            # Get real FSH lab value if available - clinical_recommendations
+            # and suggested_tests below previously referenced FSH only as
+            # static boilerplate text with no connection to actual lab data.
+            cursor.execute("""
+                SELECT biomarkers
+                FROM lab_reports
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (user_id,))
+            latest_lab = cursor.fetchone()
+            fsh_value, fsh_status = _extract_fsh_from_biomarkers(latest_lab.get("biomarkers") if latest_lab else None)
             
             # Get vasomotor data
             vasomotor = _build_vasomotor_tracker(health_logs, "custom", start, end)
@@ -446,13 +514,17 @@ def get_clinical_export(
             symptom_summary = ", ".join(primary_symptoms) if primary_symptoms else "No symptoms recorded"
             sleep_summary = f"{avg_sleep_hours:.1f} hours per night"
             vasomotor_summary = f"{vasomotor.get('avg_daily_frequency', 0):.1f} events per day"
+            age_summary = f"{user_age} years old" if user_age else "age not on file"
+            fsh_summary = f"{fsh_value} ({fsh_status})" if fsh_value is not None else "no recent FSH lab on file"
             
             llm_prompt = f"""
 Based on menopause data from {start} to {end}:
 - Stage: {menopause_stage}
+- Patient age: {age_summary}
 - Primary symptoms: {symptom_summary}
 - Average sleep: {sleep_summary}
 - Hot flashes: {vasomotor_summary}
+- Latest FSH: {fsh_summary}
 
 Provide 3-4 specific clinical recommendations for a gynecologist.
 Format as bullet points.
@@ -485,6 +557,12 @@ Format as bullet points.
                 warning_flags.append("Severe vasomotor symptoms - Consider HRT evaluation")
             if symptom_matrix.get("avg_mood_stability_percent", 50) < 40:
                 warning_flags.append("Significant mood instability - Mental health support recommended")
+            if fsh_status == "elevated":
+                warning_flags.append(f"FSH elevated ({fsh_value}) - Correlate with menstrual history")
+            if menopause_stage == "insufficient_data" and (user_age or 0) >= MIN_PLAUSIBLE_PERIMENOPAUSE_AGE:
+                warning_flags.append(
+                    "Age-appropriate but insufficient cycle/symptom history to confirm stage - continue monitoring"
+                )
             
             # Suggested tests
             suggested_tests = [
@@ -522,7 +600,7 @@ Format as bullet points.
                 warning_flags=warning_flags,
                 suggested_tests=suggested_tests,
                 data_points_collected=len(health_logs),
-                data_completeness_percent=int((len(health_logs) / max(1, (end - start).days)) * 100)
+                data_completeness_percent=min(100, int((len(health_logs) / max(1, (end - start).days)) * 100))
             ).model_dump(exclude_none=False)
     
     except Exception as e:
@@ -534,8 +612,76 @@ Format as bullet points.
 # HELPER FUNCTIONS
 # ============================================================================
 
-def _determine_menopause_stage(cycles: list) -> tuple:
-    """Determine menopause stage based on menstrual cycles."""
+# Perimenopause onset before this age is clinically atypical (suggestive of
+# POI/thyroid/PCOS rather than a default assumption) per ACOG/STRAW+10
+# guidance, so age-gating avoids mislabeling young irregular cycles.
+MIN_PLAUSIBLE_PERIMENOPAUSE_AGE = 35
+
+# Vasomotor/sleep/mood/GSM symptom keys STRAW+10-style staging treats as
+# supporting evidence for perimenopause when clustered alongside cycle
+# irregularity - a single incidental symptom is not diagnostic on its own.
+PERIMENOPAUSE_SUPPORTING_SYMPTOMS = {
+    "hot_flashes", "hot_flash", "night_sweats", "night_sweat",
+    "vaginal_dryness", "urinary_frequency", "pelvic_discomfort", "libido_impact",
+    "brain_fog", "insomnia",
+}
+MIN_SUPPORTING_SYMPTOMS_FOR_PERIMENOPAUSE = 2
+
+
+def _count_supporting_symptoms(health_logs: list) -> int:
+    """Count distinct perimenopause-supporting symptoms logged (not raw occurrences)."""
+    found = set()
+    for log in health_logs:
+        symptoms = _normalize_symptoms(log.get("symptoms"))
+        for key, value in symptoms.items():
+            if key in PERIMENOPAUSE_SUPPORTING_SYMPTOMS and value and value not in ("none", "None", 0):
+                found.add(key)
+    return len(found)
+
+
+def _extract_fsh_from_biomarkers(biomarkers_data: Any) -> tuple[Optional[str], Optional[str]]:
+    """Extract FSH value and status from lab_reports.biomarkers JSON.
+
+    Returns (fsh_value_string, status) where status is "elevated", "normal",
+    or None if no FSH found. This connects real lab data (not static boilerplate)
+    to clinical recommendations and warning flags.
+    """
+    if not biomarkers_data:
+        return None, None
+    
+    try:
+        if isinstance(biomarkers_data, str):
+            biomarkers_data = json.loads(biomarkers_data)
+        
+        needs_attention = biomarkers_data.get("needs_attention") or []
+        normal_results = biomarkers_data.get("normal_results") or []
+        
+        for biomarker in needs_attention:
+            if biomarker.get("name", "").upper() == "FSH":
+                return biomarker.get("value"), "elevated"
+        
+        for biomarker in normal_results:
+            if biomarker.get("name", "").upper() == "FSH":
+                return biomarker.get("value"), "normal"
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    
+    return None, None
+
+
+def _determine_menopause_stage(
+    cycles: list,
+    age: Optional[int] = None,
+    supporting_symptom_count: int = 0,
+) -> tuple:
+    """Determine menopause stage based on menstrual cycles, age, and symptom clustering.
+
+    Cycle irregularity alone is not diagnostic - real staging (STRAW+10/ACOG)
+    considers age plausibility and clustered vasomotor/sleep/mood/GSM symptoms
+    alongside cycle history. age and supporting_symptom_count are optional so
+    existing callers without that data still get a safe (insufficient_data)
+    result rather than a crash.
+    """
     if not cycles:
         return "unknown", None
     
@@ -551,9 +697,12 @@ def _determine_menopause_stage(cycles: list) -> tuple:
     
     months_since = (date.today() - last_period).days // 30
     
-    # Check cycle regularity
+    # Check cycle regularity. Regularity can only be assessed with >=3 completed
+    # cycles - fewer than that means there isn't enough evidence either way.
     completed_cycles = [c for c in cycles if c.get("is_completed")]
-    if len(completed_cycles) >= 3:
+    has_enough_data_for_regularity = len(completed_cycles) >= 3
+    is_irregular = False
+    if has_enough_data_for_regularity:
         cycle_lengths = []
         for i in range(len(completed_cycles) - 1):
             if completed_cycles[i].get("period_end_date") and completed_cycles[i+1].get("period_end_date"):
@@ -563,18 +712,41 @@ def _determine_menopause_stage(cycles: list) -> tuple:
                     cycle_lengths.append(length)
         
         is_irregular = len(cycle_lengths) >= 2 and max(cycle_lengths) - min(cycle_lengths) > 7
-    else:
-        is_irregular = False
     
-    # Determine stage
-    if months_since < 12 and is_irregular:
-        return "perimenopause", months_since
+    # Age-implausible irregular cycles (e.g. a 22-year-old) should not be
+    # labeled perimenopause - flag separately rather than silently guessing.
+    age_implausible = age is not None and age < MIN_PLAUSIBLE_PERIMENOPAUSE_AGE
+    
+    has_symptom_cluster = supporting_symptom_count >= MIN_SUPPORTING_SYMPTOMS_FOR_PERIMENOPAUSE
+    
+    # Determine stage. The previous fallback silently returned "perimenopause"
+    # for any case that didn't clearly match menopause/postmenopause, even when
+    # there wasn't enough completed-cycle history, wasn't an age-plausible
+    # range, or had no supporting symptom cluster - reporting a clinical stage
+    # the data couldn't support. Age-implausible cases fold into the existing
+    # "insufficient_data" value rather than introducing a new stage string,
+    # to keep the response's value space unchanged.
+    if months_since >= 60:
+        return "postmenopause", months_since
     elif 12 <= months_since < 60:
         return "menopause", months_since
-    elif months_since >= 60:
-        return "postmenopause", months_since
-    else:
+    elif (
+        months_since < 12
+        and not age_implausible
+        and has_enough_data_for_regularity
+        and is_irregular
+        and has_symptom_cluster
+    ):
         return "perimenopause", months_since
+    elif (
+        months_since < 12
+        and not age_implausible
+        and has_enough_data_for_regularity
+        and not is_irregular
+    ):
+        return "regular_cycles", months_since
+    else:
+        return "insufficient_data", months_since
 
 
 def _determine_cycle_status(cycles: list) -> str:
@@ -609,7 +781,13 @@ def _determine_cycle_status(cycles: list) -> str:
 
 
 def _extract_top_symptoms(health_logs: list, limit: int = 5) -> List[str]:
-    """Extract most common symptoms from health logs."""
+    """Extract most common symptoms from health logs.
+
+    Returns symptom keys only (e.g. "cramps", "hot_flashes") - this feeds
+    user/doctor-facing fields (MenopauseSummary.primary_symptoms,
+    ClinicalExport.primary_symptoms), so mood/energy tracking must not leak
+    into the output as raw values like "mood_🙂".
+    """
     symptom_counts = defaultdict(int)
     
     for log in health_logs:
@@ -619,14 +797,6 @@ def _extract_top_symptoms(health_logs: list, limit: int = 5) -> List[str]:
         for symptom, value in symptoms.items():
             if value and value != "none" and symptom not in ["notes", "sleep_hours", "sleep_quality"]:
                 symptom_counts[symptom] += 1
-    
-    # Also count mood and energy
-    for log in health_logs:
-        if log.get("mood"):
-            mood_key = f"mood_{log.get('mood')}"
-            symptom_counts["mood_changes"] += 1
-        if log.get("energy_level"):
-            symptom_counts["low_energy"] += 1
     
     # Sort and return top
     sorted_symptoms = sorted(symptom_counts.items(), key=lambda x: x[1], reverse=True)
@@ -676,8 +846,12 @@ def _get_recommendations(menopause_stage: str, symptoms: List[str]) -> List[str]
     
     if menopause_stage == "perimenopause":
         recs.append("Track cycles and symptoms to monitor progression")
-    else:
+    elif menopause_stage in ("menopause", "postmenopause"):
         recs.append("Focus on long-term bone and cardiovascular health")
+    elif menopause_stage == "insufficient_data":
+        recs.append("Continue logging cycles to build a clearer picture of your stage")
+    else:
+        recs.append("Continue tracking your cycle to monitor for changes")
     
     return recs[:3]
 
@@ -846,17 +1020,20 @@ def _build_symptom_matrix(
                 if isinstance(value, str):
                     symptom_severity[symptom][value] += 1
         
-        # Set entry fields
-        entry.hot_flash = symptoms.get("hot_flash")
+        # Set entry fields.
+        # _normalize_symptoms() keys are derived from the exact logged text
+        # (e.g. "Hot flashes" -> "hot_flashes", "Headache" -> "headache"), so
+        # these must match that output rather than assumed singular/plural forms.
+        entry.hot_flash = symptoms.get("hot_flashes") or symptoms.get("hot_flash")
         entry.hot_flash_count = symptoms.get("hot_flash_count")
-        entry.night_sweat = symptoms.get("night_sweat")
+        entry.night_sweat = symptoms.get("night_sweats") or symptoms.get("night_sweat")
         entry.sleep_disruption = "moderate" if symptoms.get("sleep_hours", 8) < 6 else "none"
         entry.sleep_hours = symptoms.get("sleep_hours")
         entry.brain_fog = symptoms.get("brain_fog")
         entry.joint_pain = symptoms.get("joint_pain")
         entry.vaginal_dryness = symptoms.get("vaginal_dryness")
         entry.weight_change_lbs = symptoms.get("weight_change_lbs")
-        entry.headaches = symptoms.get("headaches")
+        entry.headaches = symptoms.get("headache") or symptoms.get("headaches")
         entry.fatigue = symptoms.get("fatigue")
         
         entries.append(entry.model_dump())
@@ -876,11 +1053,11 @@ def _build_symptom_matrix(
     # Extract correlations
     correlations = _calculate_symptom_correlations(health_logs)
     
-    # Calculate mood stability
+    # Calculate mood stability (mood is stored as emoji, not English words)
     moods = []
     for log in health_logs:
         if log.get("mood"):
-            mood_score = {"happy": 8, "neutral": 5, "sad": 2, "anxious": 3, "irritable": 2}.get(log.get("mood"), 5)
+            mood_score = MOOD_EMOJI_SCORES.get(log.get("mood"), 5)
             moods.append(mood_score)
     mood_stability = int((sum(moods) / len(moods) / 10 * 100)) if moods else 50
     
@@ -985,26 +1162,39 @@ def _calculate_symptom_correlations(health_logs: list) -> List[Dict]:
         if log.get("mood"):
             symptoms_present.append("mood")
         
+        # energy_level is a separate health_logs column, not part of the symptoms
+        # JSON, but is still a trackable per-day signal for correlations
+        if log.get("energy_level"):
+            symptoms_present.append("energy_level")
+        
         symptoms = _normalize_symptoms(log.get("symptoms"))
         
         for symptom, value in symptoms.items():
             if value and value not in ["none", "None", 0]:
                 symptoms_present.append(symptom)
         
+        # Sleep disruption is inferred, not a literal symptom key, so add it
+        # separately when sleep_hours indicates disrupted sleep
+        if symptoms.get("sleep_hours") is not None and symptoms.get("sleep_hours") < 6:
+            symptoms_present.append("sleep_disruption")
+        
         # Track co-occurrences
         for i, s1 in enumerate(symptoms_present):
             for s2 in symptoms_present[i+1:]:
                 co_occurrences[s1][s2] += 1
     
-    # Format as correlation list with percentages
+    # Format as correlation list with percentages.
+    # Keys must match the snake_case keys _normalize_symptoms() actually produces
+    # from logged symptom text (e.g. "Hot flashes" -> "hot_flashes", plural "s"
+    # included) - the previous singular keys here never matched real data.
     correlations = []
     
     correlation_descriptions = {
-        ("hot_flash", "sleep_disruption"): "Hot flash episodes after 10pm directly correlate with {pct}% reduction in deep sleep duration.",
-        ("sleep_disruption", "mood"): "Under 6hrs sleep raises irritability and anxiety scores by {pct}% the following day.",
-        ("hot_flash", "mood"): "Days with 5+ episodes show elevated mood disruption in {pct}% of logged entries.",
-        ("night_sweat", "sleep_disruption"): "Night sweats interrupt REM cycle with {pct}% sleep quality reduction.",
-        ("vaginal_dryness", "libido"): "Vaginal dryness correlates with {pct}% reported libido impact.",
+        ("hot_flashes", "sleep_disruption"): "Hot flash episodes directly correlate with {pct}% reduction in deep sleep duration.",
+        ("sleep_disruption", "mood"): "Sleep disruption raises irritability and mood changes in {pct}% of logged entries.",
+        ("hot_flashes", "mood"): "Days with hot flashes show elevated mood disruption in {pct}% of logged entries.",
+        ("night_sweats", "sleep_disruption"): "Night sweats interrupt sleep with {pct}% co-occurrence with sleep disruption.",
+        ("vaginal_dryness", "libido_impact"): "Vaginal dryness correlates with {pct}% reported libido impact.",
         ("fatigue", "energy_level"): "High fatigue scores correspond to {pct}% energy level reduction."
     }
     

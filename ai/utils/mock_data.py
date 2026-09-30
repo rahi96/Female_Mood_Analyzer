@@ -10,6 +10,15 @@ from typing import List, Dict, Any
 # MOCK DATA - Each user has DIFFERENT data to verify calculations vary
 # ============================================================================
 
+MOCK_USERS = {
+    2: {"id": 2, "created_at": datetime(2026, 8, 6, 10, 0, 0)},
+    9: {"id": 9, "created_at": datetime(2026, 8, 9, 10, 0, 0)},
+    10: {"id": 10, "created_at": datetime(2026, 8, 9, 10, 0, 0)},
+    16: {"id": 16, "created_at": datetime(2026, 8, 10, 10, 0, 0)},
+    17: {"id": 17, "created_at": datetime(2026, 8, 11, 10, 0, 0)},
+    19: {"id": 19, "created_at": datetime(2026, 8, 12, 10, 0, 0)},
+}
+
 MOCK_HEALTH_LOGS = {
     2: [],  # No health logs (fallback scenario)
     9: [
@@ -65,6 +74,38 @@ MOCK_HEALTH_LOGS = {
             "notes": "Okay"
         },
     ],
+    16: [
+        {
+            "log_date": date(2026, 9, 25),
+            "mood": "7",
+            "energy_level": "High",
+            "symptoms": '{"mood": "positive"}',
+            "notes": "Good day"
+        },
+        {
+            "log_date": date(2026, 9, 24),
+            "mood": "7",
+            "energy_level": "High",
+            "symptoms": '{}',
+            "notes": "Active and alert"
+        },
+    ],
+    17: [
+        {
+            "log_date": date(2026, 9, 25),
+            "mood": "6",
+            "energy_level": "Moderate",
+            "symptoms": '{"energy": "moderate"}',
+            "notes": "Steady day"
+        },
+        {
+            "log_date": date(2026, 9, 24),
+            "mood": "6",
+            "energy_level": "Moderate",
+            "symptoms": '{}',
+            "notes": "Regular pace"
+        },
+    ],
     19: [
         {
             "log_date": date(2026, 9, 25),
@@ -112,6 +153,30 @@ MOCK_MENSTRUAL_CYCLES = {
         {
             "period_start_date": date(2026, 8, 21),
             "cycle_length": 30,
+            "current_phase": "complete"
+        },
+    ],
+    16: [
+        {
+            "period_start_date": date(2026, 9, 15),
+            "cycle_length": 28,
+            "current_phase": "follicular"
+        },
+        {
+            "period_start_date": date(2026, 8, 18),
+            "cycle_length": 28,
+            "current_phase": "complete"
+        },
+    ],
+    17: [
+        {
+            "period_start_date": date(2026, 9, 10),
+            "cycle_length": 29,
+            "current_phase": "ovulation"
+        },
+        {
+            "period_start_date": date(2026, 8, 12),
+            "cycle_length": 29,
             "current_phase": "complete"
         },
     ],
@@ -166,7 +231,9 @@ MOCK_LAB_REPORTS = {
 MOCK_PROFILES = {
     2: {"activity_level": "sedentary", "life_stage": "perimenopause", "date_of_birth": date(1975, 5, 15)},
     9: {"activity_level": "very_active", "life_stage": "perimenopause", "date_of_birth": date(1972, 3, 20)},
-    10: {"activity_level": "moderately_active", "life_stage": "menopause", "date_of_birth": date(1968, 11, 10)},
+    10: {"activity_level": "moderate", "life_stage": "menopause", "date_of_birth": date(1968, 11, 10)},
+    16: {"activity_level": "active", "life_stage": "perimenopause", "date_of_birth": date(1974, 2, 10)},
+    17: {"activity_level": "light", "life_stage": "perimenopause", "date_of_birth": date(1976, 6, 5)},
     19: {"activity_level": "very_active", "life_stage": "perimenopause", "date_of_birth": date(1970, 7, 25)},
 }
 
@@ -585,7 +652,12 @@ def mock_query_db(query: str, params: tuple = None) -> List[Dict[str, Any]]:
     # Parse query to determine which table
     query_lower = query.lower()
     
-    if "health_logs" in query_lower:
+    if "users" in query_lower and "health" not in query_lower:
+        # Handle queries to users table
+        user = MOCK_USERS.get(user_id)
+        return [user] if user else []
+    
+    elif "health_logs" in query_lower:
         return MOCK_HEALTH_LOGS.get(user_id, [])
     
     elif "menstrual_cycles" in query_lower:

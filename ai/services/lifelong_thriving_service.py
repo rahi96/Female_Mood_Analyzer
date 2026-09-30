@@ -7,6 +7,7 @@ Handles:
 """
 
 import logging
+import json
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional, Tuple, Any
 from collections import defaultdict
@@ -26,7 +27,7 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 # Flag to enable/disable mock data
-USE_MOCK_DATA = True  # Set to False to use real database
+USE_MOCK_DATA = False  # Use real AWS RDS database
 
 
 # ============================================================================
@@ -56,51 +57,221 @@ class VitalityService:
         "Reproductive Health": 0.05,  # If applicable
     }
     
+    # Testing threshold: 30 days (will change to 365 days in production)
+    ELIGIBILITY_DAYS_THRESHOLD = 30
+    
     def __init__(self, user_id: int, years_back: int = 6):
         self.user_id = user_id
         self.years_back = years_back
         self.claude = ClaudeLLM()
     
+    def _check_user_eligibility(self) -> Tuple[bool, str]:
+        """
+        Check if user is eligible for Lifelong Thriving feature.
+        Requires: Account age >= ELIGIBILITY_DAYS_THRESHOLD (30 days for testing, 365 days for production)
+        
+        Returns: (is_eligible: bool, message: str)
+        """
+        try:
+            db_query = mock_query_db if USE_MOCK_DATA else query_db
+            
+            # Try multiple column name variants (created_at, createdAt, created_date)
+            queries = [
+                "SELECT created_at FROM users WHERE id = %s",
+                "SELECT createdAt FROM users WHERE id = %s",
+                "SELECT created_date FROM users WHERE id = %s",
+            ]
+            
+            result = None
+            created_at = None
+            
+            for attempt, query in enumerate(queries):
+                try:
+                    logger.info(f"   🔍 Eligibility attempt {attempt+1}: {query}")
+                    result = db_query(query, (self.user_id,))
+                    if result:
+                        created_at = result[0].get(list(result[0].keys())[0])  # Get first column value
+                        logger.info(f"   ✓ Found user with created_at: {created_at}")
+                        break
+                except Exception as e:
+                    logger.debug(f"   ⚠️  Query attempt {attempt+1} failed: {e}")
+                    continue
+            
+            if not result or not created_at:
+                logger.warning(f"   ⚠️  Could not verify user {self.user_id} eligibility - proceeding with caution")
+                # For testing: allow to proceed but log warning
+                # In production, this would return False
+                if not USE_MOCK_DATA:
+                    logger.warning(f"   ℹ️  Skipping eligibility check - assuming user is eligible")
+                    return True, "Eligibility check skipped"
+                return False, f"User {self.user_id} not found"
+            
+            # Check if account is old enough (30 days for testing)
+            threshold_date = datetime.now() - timedelta(days=self.ELIGIBILITY_DAYS_THRESHOLD)
+            
+            if isinstance(created_at, str):
+                created_at = datetime.fromisoformat(created_at)
+            elif isinstance(created_at, date) and not isinstance(created_at, datetime):
+                created_at = datetime.combine(created_at, datetime.min.time())
+            
+            if created_at > threshold_date:
+                days_until_eligible = (threshold_date - created_at).days
+                return False, f"Account age requirement: Come back in {abs(days_until_eligible)} days"
+            
+            return True, "User eligible"
+            
+        except Exception as e:
+            logger.error(f"Error checking user eligibility: {e}")
+            # Fail open - allow access if check fails
+            return True, f"Eligibility check skipped: {str(e)}"
+    
+    def _calculate_data_completeness(self, user_data: Dict) -> float:
+        """
+        Calculate what % of available data sources the user has.
+        
+        Data sources: health_logs, health_trends, lab_reports, menstrual_cycles, 
+                      terra_activity_data, profile
+        
+        Returns: 0-100 percentage score
+        """
+        total_sources = 6
+        present_sources = 0
+        
+        if user_data.get("health_logs"):
+            present_sources += 1
+        if user_data.get("health_trends"):
+            present_sources += 1
+        if user_data.get("lab_reports"):
+            present_sources += 1
+        if user_data.get("menstrual_cycles"):
+            present_sources += 1
+        if user_data.get("terra_activity_data"):
+            present_sources += 1
+        if user_data.get("profile"):
+            present_sources += 1
+        
+        completeness = (present_sources / total_sources) * 100
+        return round(completeness, 1)
+    
     def get_vitality_overview(self) -> VitalityResponse:
         """Generate complete vitality response."""
+        print(f"\n\n{'='*80}\n[VITALITY] START get_vitality_overview user_id={self.user_id}")
+        
         try:
+            logger.info(f"🔵 [1/8] Checking eligibility for user {self.user_id}")
+            print(f"[VITALITY] [1] Eligibility check started")
+            # Check eligibility first
+            is_eligible, eligibility_message = self._check_user_eligibility()
+            if not is_eligible:
+                logger.warning(f"User {self.user_id} ineligible: {eligibility_message}")
+                raise ValueError(eligibility_message)
+            
+            logger.info(f"🟢 [2/8] Fetching health data for user {self.user_id}")
             # Fetch all user health data
-            user_data = self._fetch_user_health_data()
+            try:
+                user_data = self._fetch_user_health_data()
+                logger.info(f"   User data fetched: {len(user_data)} keys")
+            except Exception as e:
+                logger.error(f"   ERROR fetching user data: {e}")
+                raise
             
-            # Calculate yearly vitality trend
-            trend_data = self._calculate_yearly_trends(user_data)
+            logger.info(f"🟢 [3/8] Calculating yearly trends...")
+            try:
+                # Calculate yearly vitality trend
+                trend_data = self._calculate_yearly_trends(user_data)
+                logger.info(f"   Trends calculated: {len(trend_data)} years")
+            except Exception as e:
+                logger.error(f"   ERROR calculating trends: {e}")
+                trend_data = []
             
-            # Calculate current dimensions
-            dimensions = self._calculate_dimensions(user_data)
+            logger.info(f"🟢 [4/8] Calculating dimensions...")
+            print(f"[VITALITY] [4] About to calculate dimensions, user_data keys: {list(user_data.keys())}")
+            try:
+                # Calculate current dimensions
+                dimensions = self._calculate_dimensions(user_data)
+                print(f"[VITALITY] [4] Dimensions calculated: {len(dimensions)} returned")
+                if dimensions:
+                    print(f"[VITALITY] [4] First dimension: {dimensions[0].name if dimensions else 'NONE'}")
+                logger.info(f"   Dimensions calculated: {len(dimensions)} dimensions")
+            except Exception as e:
+                logger.error(f"   ERROR calculating dimensions: {e}")
+                print(f"[VITALITY] [4] ERROR in _calculate_dimensions: {e}")
+                import traceback
+                print(traceback.format_exc())
+                dimensions = []
             
-            # Calculate overall vitality index
-            vitality_index = self._calculate_vitality_index(dimensions)
+            logger.info(f"🟢 [5/8] Calculating vitality index...")
+            try:
+                # Calculate overall vitality index
+                vitality_index = self._calculate_vitality_index(dimensions)
+                logger.info(f"   Vitality index: {vitality_index}")
+            except Exception as e:
+                logger.error(f"   ERROR calculating vitality index: {e}")
+                vitality_index = 50.0
             
-            # Determine vitality level
-            vitality_level = self._get_vitality_level(vitality_index)
+            logger.info(f"🟢 [6/8] Getting vitality level...")
+            try:
+                # Determine vitality level
+                vitality_level = self._get_vitality_level(vitality_index)
+                logger.info(f"   Vitality level: {vitality_level}")
+            except Exception as e:
+                logger.error(f"   ERROR getting vitality level: {e}")
+                vitality_level = "Unknown"
             
-            # Generate personal statement
-            personal_best = self._generate_personal_statement(
-                vitality_index, vitality_level, dimensions
-            )
+            logger.info(f"🟢 [7/8] Generating personal statement...")
+            try:
+                # Generate personal statement
+                personal_best = self._generate_personal_statement(
+                    vitality_index, vitality_level, dimensions
+                )
+                logger.info(f"   Personal statement: {personal_best}")
+            except Exception as e:
+                logger.error(f"   ERROR generating personal statement: {e}")
+                personal_best = "Health profile being assessed"
             
-            # Get AI insights if requested
-            ai_insights = self._generate_ai_insights(
-                vitality_index, dimensions, trend_data, user_data
-            )
+            logger.info(f"🟢 [8/8] Generating AI insights...")
+            try:
+                # Get AI insights if requested
+                ai_insights = self._generate_ai_insights(
+                    vitality_index, dimensions, trend_data, user_data
+                )
+                logger.info(f"   AI insights generated successfully")
+            except Exception as e:
+                logger.error(f"   ERROR generating AI insights: {e}")
+                ai_insights = None
             
-            return VitalityResponse(
+            # Calculate data completeness
+            try:
+                data_completeness = self._calculate_data_completeness(user_data)
+            except Exception as e:
+                logger.error(f"   ERROR calculating data completeness: {e}")
+                data_completeness = 0.0
+            
+            logger.info(f"✅ Vitality overview complete for user {self.user_id}")
+            print(f"[VITALITY] [RESPONSE] About to create VitalityResponse with {len(dimensions)} dimensions")
+            
+            response = VitalityResponse(
                 vitality_index=vitality_index,
                 vitality_level=vitality_level,
                 personal_best=personal_best,
                 trend_6_years=trend_data,
                 dimensions=dimensions,
-                ai_insights=ai_insights
+                ai_insights=ai_insights,
+                eligibility_status="eligible",
+                data_completeness=data_completeness
             )
+            
+            print(f"[VITALITY] [RESPONSE] VitalityResponse created successfully, dims in response: {len(response.dimensions)}")
+            print(f"[VITALITY] [SUCCESS] Returning valid response")
+            
+            return response
         except Exception as e:
             import traceback
-            logger.error(f"❌ ERROR calculating vitality for user {self.user_id}: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            error_msg = f"❌ ERROR calculating vitality for user {self.user_id}: {e}\nTraceback: {traceback.format_exc()}"
+            logger.error(error_msg)
+            print(f"[VITALITY] [OUTER_EXCEPTION] {error_msg}")
+            print(traceback.format_exc())
+            print(f"[VITALITY] [FALLBACK] Returning fallback response")
             # Return fallback response
             return self._get_fallback_vitality_response()
     
@@ -181,6 +352,21 @@ class VitalityService:
             profile = db_query(query, (self.user_id,))
             data["profile"] = profile[0] if profile else {}
             logger.info(f"   ✓ profile: {bool(data['profile'])}")
+            
+            # Fetch sleep & activity data from terra_activity_data
+            query = """
+                SELECT DATE(created_at) as activity_date, type, payload
+                FROM terra_activity_data
+                WHERE user_id = %s AND created_at >= DATE_SUB(NOW(), INTERVAL %s YEAR)
+                ORDER BY created_at DESC
+                LIMIT 500
+            """
+            try:
+                data["terra_activity_data"] = db_query(query, (self.user_id, self.years_back))
+                logger.info(f"   ✓ terra_activity_data: {len(data['terra_activity_data'])} records found")
+            except Exception as e:
+                logger.warning(f"   ⚠️  terra_activity_data query failed: {e}")
+                data["terra_activity_data"] = []
             
             return data
         except Exception as e:
@@ -264,92 +450,153 @@ class VitalityService:
     def _calculate_dimensions(self, user_data: Dict) -> List[VitalityDimension]:
         """Calculate individual health dimensions."""
         dimensions = []
-        logger.info(f"📊 CALCULATING DIMENSIONS (logs={len(user_data['health_logs'])}, cycles={len(user_data['menstrual_cycles'])})")
+        print(f"[VITALITY] [_calculate_dimensions START] user_data keys: {list(user_data.keys())}")
+        logger.info(f"📊 CALCULATING DIMENSIONS (logs={len(user_data.get('health_logs', []))}, cycles={len(user_data.get('menstrual_cycles', []))})")
         
         # Mobility & Strength - from activity level and health logs
-        mobility_score = self._calculate_mobility_score(user_data)
-        logger.info(f"   Mobility & Strength: {mobility_score}")
-        dimensions.append(VitalityDimension(
-            name="Mobility & Strength",
-            score=mobility_score,
-            status=self._get_status_from_score(mobility_score),
-            trend="stable",  # Could calculate actual trend
-            last_updated=self._get_last_update_date(user_data["health_logs"]),
-            description="Based on activity levels and reported mobility"
-        ))
+        mobility_score = 60  # Default
+        try:
+            mobility_score = self._calculate_mobility_score(user_data)
+            logger.info(f"   ✓ Mobility & Strength: {mobility_score}")
+        except Exception as e:
+            logger.error(f"   ❌ Mobility calculation failed: {e}, using default")
+            mobility_score = 60
+        
+        try:
+            dim = VitalityDimension(
+                name="Mobility & Strength",
+                score=float(mobility_score),
+                status=self._get_status_from_score(mobility_score),
+                trend="stable",
+                last_updated=self._get_last_update_date(user_data.get("health_logs", [])),
+                description="Based on activity levels and reported mobility"
+            )
+            dimensions.append(dim)
+            print(f"[VITALITY] [APPEND] Mobility & Strength: score={mobility_score}, status={dim.status}")
+        except Exception as e:
+            logger.error(f"❌ Failed to create Mobility dimension: {e}")
+            print(f"[VITALITY] [ERROR-APPEND] Mobility & Strength: {e}")
+            import traceback
+            print(traceback.format_exc())
         
         # Cardiovascular Health - from energy logs and lab data
-        cardio_score = self._calculate_cardiovascular_score(user_data)
+        cardio_score = 60  # Default
+        try:
+            cardio_score = self._calculate_cardiovascular_score(user_data)
+            logger.info(f"   ✓ Cardiovascular Health: {cardio_score}")
+        except Exception as e:
+            logger.error(f"   ❌ Cardiovascular calculation failed: {e}, using default")
+            cardio_score = 60
+        
         dimensions.append(VitalityDimension(
             name="Cardiovascular Health",
-            score=cardio_score,
+            score=float(cardio_score),
             status=self._get_status_from_score(cardio_score),
             trend="stable",
-            last_updated=self._get_last_update_date(user_data["lab_reports"]),
+            last_updated=self._get_last_update_date(user_data.get("lab_reports", [])),
             description="Based on energy levels and cardiovascular biomarkers"
         ))
         
         # Cognitive Wellness - from focus/brain fog symptoms
-        cognitive_score = self._calculate_cognitive_score(user_data)
+        cognitive_score = 60  # Default
+        try:
+            cognitive_score = self._calculate_cognitive_score(user_data)
+            logger.info(f"   ✓ Cognitive Wellness: {cognitive_score}")
+        except Exception as e:
+            logger.error(f"   ❌ Cognitive calculation failed: {e}, using default")
+            cognitive_score = 60
+        
         dimensions.append(VitalityDimension(
             name="Cognitive Wellness",
-            score=cognitive_score,
+            score=float(cognitive_score),
             status=self._get_status_from_score(cognitive_score),
             trend="stable",
-            last_updated=self._get_last_update_date(user_data["health_logs"]),
+            last_updated=self._get_last_update_date(user_data.get("health_logs", [])),
             description="Based on focus, brain fog, and mental clarity"
         ))
         
         # Sleep Quality - from health trends and logs
-        sleep_score = self._calculate_sleep_score(user_data)
+        sleep_score = 60  # Default
+        try:
+            sleep_score = self._calculate_sleep_score(user_data)
+            logger.info(f"   ✓ Sleep Quality: {sleep_score}")
+        except Exception as e:
+            logger.error(f"   ❌ Sleep calculation failed: {e}, using default")
+            sleep_score = 60
+        
         dimensions.append(VitalityDimension(
             name="Sleep Quality",
-            score=sleep_score,
+            score=float(sleep_score),
             status=self._get_status_from_score(sleep_score),
             trend="stable",
-            last_updated=self._get_last_update_date(user_data["health_logs"]),
+            last_updated=self._get_last_update_date(user_data.get("health_logs", [])),
             description="Based on sleep duration and quality patterns"
         ))
         
         # Emotional Wellbeing - from mood logs
-        emotional_score = self._calculate_emotional_score(user_data)
+        emotional_score = 60  # Default
+        try:
+            emotional_score = self._calculate_emotional_score(user_data)
+            logger.info(f"   ✓ Emotional Wellbeing: {emotional_score}")
+        except Exception as e:
+            logger.error(f"   ❌ Emotional calculation failed: {e}, using default")
+            emotional_score = 60
+        
         dimensions.append(VitalityDimension(
             name="Emotional Wellbeing",
-            score=emotional_score,
+            score=float(emotional_score),
             status=self._get_status_from_score(emotional_score),
             trend="stable",
-            last_updated=self._get_last_update_date(user_data["health_logs"]),
+            last_updated=self._get_last_update_date(user_data.get("health_logs", [])),
             description="Based on mood patterns and emotional state"
         ))
         
         # Metabolic Health - from lab biomarkers
-        metabolic_score = self._calculate_metabolic_score(user_data)
+        metabolic_score = 60  # Default
+        try:
+            metabolic_score = self._calculate_metabolic_score(user_data)
+            logger.info(f"   ✓ Metabolic Health: {metabolic_score}")
+        except Exception as e:
+            logger.error(f"   ❌ Metabolic calculation failed: {e}, using default")
+            metabolic_score = 60
+        
         dimensions.append(VitalityDimension(
             name="Metabolic Health",
-            score=metabolic_score,
+            score=float(metabolic_score),
             status=self._get_status_from_score(metabolic_score),
             trend="stable",
-            last_updated=self._get_last_update_date(user_data["lab_reports"]),
+            last_updated=self._get_last_update_date(user_data.get("lab_reports", [])),
             description="Based on metabolic biomarkers and lab results"
         ))
         
         # Reproductive Health - from cycle regularity
-        repro_score = self._calculate_reproductive_score(user_data)
+        repro_score = 60  # Default
+        try:
+            repro_score = self._calculate_reproductive_score(user_data)
+            logger.info(f"   ✓ Reproductive Health: {repro_score}")
+        except Exception as e:
+            logger.error(f"   ❌ Reproductive calculation failed: {e}, using default")
+            repro_score = 60
+        
         dimensions.append(VitalityDimension(
             name="Reproductive Health",
-            score=repro_score,
+            score=float(repro_score),
             status=self._get_status_from_score(repro_score),
             trend="stable",
-            last_updated=self._get_last_update_date(user_data["menstrual_cycles"]),
+            last_updated=self._get_last_update_date(user_data.get("menstrual_cycles", [])),
             description="Based on cycle regularity and hormone balance"
         ))
         
+        logger.info(f"📊 Dimension calculation complete: {len(dimensions)} dimensions created")
         return dimensions
     
     def _calculate_mobility_score(self, user_data: Dict) -> float:
-        """Calculate mobility & strength score from activity level."""
+        """Calculate mobility & strength score from activity level and terra data."""
+        scores = []
+        
+        # First try: Get from profile activity_level
         profile = user_data.get("profile", {})
-        activity_level = profile.get("activity_level", "moderate")
+        activity_level = profile.get("activity_level", "").lower() if profile else ""
         
         activity_map = {
             "sedentary": 30,
@@ -359,10 +606,42 @@ class VitalityService:
             "very_active": 95
         }
         
-        return activity_map.get(activity_level, 50)
+        if activity_level in activity_map:
+            scores.append(activity_map[activity_level])
+        
+        # Second: Extract from terra_activity_data (steps, calories, etc.)
+        terra_data = user_data.get("terra_activity_data", [])
+        if terra_data:
+            for record in terra_data[-30:]:  # Last 30 days
+                try:
+                    payload = record.get("payload", {})
+                    if isinstance(payload, str):
+                        import json
+                        payload = json.loads(payload)
+                    
+                    # Check for activity indicators
+                    calories = payload.get("calories_burned", 0) or payload.get("energy_expended", 0)
+                    steps = payload.get("steps", 0)
+                    
+                    if calories > 2500 or steps > 10000:
+                        scores.append(85)  # Very active
+                    elif calories > 2000 or steps > 7000:
+                        scores.append(75)  # Active
+                    elif calories > 1500 or steps > 5000:
+                        scores.append(65)  # Moderate
+                    elif calories > 1000 or steps > 3000:
+                        scores.append(50)  # Light
+                    else:
+                        scores.append(40)  # Sedentary
+                except:
+                    pass
+        
+        if scores:
+            return sum(scores) / len(scores)
+        return 60  # Default if no data
     
     def _calculate_cardiovascular_score(self, user_data: Dict) -> float:
-        """Calculate cardiovascular health from energy and biomarkers."""
+        """Calculate cardiovascular health from energy, biomarkers, and activity."""
         scores = []
         
         # Map ENUM energy levels to scores
@@ -374,54 +653,92 @@ class VitalityService:
             "Very High": 100
         }
         
-        # From energy levels in health logs
-        for log in user_data["health_logs"][-30:]:  # Last 30 logs
-            energy_raw = log.get("energy_level", "Moderate")
-            energy_score = energy_map.get(str(energy_raw), 60)
-            scores.append(energy_score)
+        # Try health logs first
+        health_logs = user_data.get("health_logs", [])
+        if health_logs:
+            for log in health_logs[-30:]:
+                energy_raw = log.get("energy_level", "Moderate")
+                energy_score = energy_map.get(str(energy_raw), 60)
+                scores.append(energy_score)
         
-        # From lab biomarkers if available
-        for report in user_data["lab_reports"]:
-            if "heart" in (report.get("test_type") or "").lower():
-                # Assume higher values are better (would need to parse biomarkers)
-                scores.append(75)
+        # Try lab biomarkers
+        lab_reports = user_data.get("lab_reports", [])
+        if lab_reports:
+            for report in lab_reports:
+                if "heart" in (report.get("panel", "") or "").lower() or "cardiovascular" in (report.get("panel", "") or "").lower():
+                    scores.append(75)
         
-        return sum(scores) / len(scores) if scores else 60
+        # Estimate from terra activity data (high activity = good cardiovascular)
+        terra_data = user_data.get("terra_activity_data", [])
+        if terra_data and not scores:  # Only if we don't have other data
+            for record in terra_data[-30:]:
+                try:
+                    payload = record.get("payload", {})
+                    if isinstance(payload, str):
+                        import json
+                        payload = json.loads(payload)
+                    hr_avg = payload.get("heart_rate_average") or payload.get("avg_heart_rate", 70)
+                    if 60 <= hr_avg <= 100:
+                        scores.append(70)
+                    elif hr_avg < 60:
+                        scores.append(80)  # Athletic
+                    else:
+                        scores.append(60)
+                except:
+                    pass
+        
+        if scores:
+            return sum(scores) / len(scores)
+        return 60  # Default when no data available
     
     def _calculate_cognitive_score(self, user_data: Dict) -> float:
-        """Calculate cognitive wellness from symptoms."""
+        """Calculate cognitive wellness from symptoms and notes."""
         scores = []
         
-        for log in user_data["health_logs"][-30:]:
-            symptoms = log.get("symptoms", "")
-            
-            # Check for negative indicators
-            negative_keywords = ["brain fog", "confusion", "memory loss", "concentration"]
-            positive_keywords = ["focused", "clear", "sharp", "alert"]
-            
-            score = 70  # Default baseline
-            
-            if symptoms:
-                symptoms_lower = symptoms.lower()
-                for keyword in negative_keywords:
-                    if keyword in symptoms_lower:
-                        score -= 10
-                for keyword in positive_keywords:
-                    if keyword in symptoms_lower:
-                        score += 10
-            
-            scores.append(max(0, min(100, score)))
+        health_logs = user_data.get("health_logs", [])
+        if health_logs:
+            for log in health_logs[-30:]:
+                symptoms_data = log.get("symptoms", {})
+                notes = log.get("notes", "")
+                
+                # Handle symptoms as JSON or string
+                if isinstance(symptoms_data, str):
+                    combined_text = symptoms_data + " " + notes
+                elif isinstance(symptoms_data, dict):
+                    combined_text = str(symptoms_data) + " " + notes
+                else:
+                    combined_text = notes
+                
+                # Check for cognitive indicators
+                negative_keywords = ["brain fog", "confusion", "memory loss", "concentration", "confused", "fuzzy"]
+                positive_keywords = ["focused", "clear", "sharp", "alert", "clarity"]
+                
+                score = 70  # Default baseline
+                
+                if combined_text:
+                    combined_lower = combined_text.lower()
+                    for keyword in negative_keywords:
+                        if keyword in combined_lower:
+                            score -= 10
+                    for keyword in positive_keywords:
+                        if keyword in combined_lower:
+                            score += 10
+                
+                scores.append(max(0, min(100, score)))
         
-        return sum(scores) / len(scores) if scores else 60
+        # Default when no logs available
+        if scores:
+            return sum(scores) / len(scores)
+        return 65  # Neutral default
     
     def _calculate_sleep_score(self, user_data: Dict) -> float:
-        """Calculate sleep quality from health trends and logs."""
+        """Calculate sleep quality from health logs, trends, and activity data."""
         scores = []
         
-        for log in user_data["health_logs"][-30:]:
-            # Check sleep-related notes
+        # Check health logs for sleep notes
+        health_logs = user_data.get("health_logs", [])
+        for log in health_logs[-30:] if health_logs else []:
             notes = log.get("notes", "").lower()
-            
             score = 70  # Default
             if "slept well" in notes or "good sleep" in notes:
                 score = 85
@@ -429,61 +746,121 @@ class VitalityService:
                 score = 40
             elif "tired" in notes or "exhausted" in notes:
                 score = 35
-            
             scores.append(score)
         
-        # Check trend data for sleep correlation
-        for trend in user_data["health_trends"][-12:]:
+        # Check health trends
+        health_trends = user_data.get("health_trends", [])
+        for trend in health_trends[-12:] if health_trends else []:
             try:
-                trend_data = trend.get("trend_data", {})
+                trend_data = trend.get("sleep_energy_correlation_chart") or trend.get("hormone_mood", {})
                 if isinstance(trend_data, str):
                     import json
                     trend_data = json.loads(trend_data)
-                
-                if "sleep" in trend_data:
-                    sleep_val = trend_data["sleep"]
-                    if isinstance(sleep_val, (int, float)):
-                        scores.append(min(100, sleep_val))
+                if trend_data and isinstance(trend_data, dict):
+                    scores.append(70)  # Has trend data = reasonable sleep
             except:
                 pass
         
-        return sum(scores) / len(scores) if scores else 65
+        # Estimate from terra activity (sleep tracking if available)
+        terra_data = user_data.get("terra_activity_data", [])
+        for record in terra_data[-30:] if terra_data else []:
+            try:
+                payload = record.get("payload", {})
+                if isinstance(payload, str):
+                    import json
+                    payload = json.loads(payload)
+                if "sleep" in payload:
+                    sleep_data = payload["sleep"]
+                    duration = sleep_data.get("duration", 0) if isinstance(sleep_data, dict) else 0
+                    if duration >= 7 * 3600:  # 7+ hours
+                        scores.append(85)
+                    elif duration >= 6 * 3600:  # 6+ hours
+                        scores.append(70)
+                    elif duration >= 5 * 3600:  # 5+ hours
+                        scores.append(50)
+                    else:
+                        scores.append(40)
+            except:
+                pass
+        
+        if scores:
+            return sum(scores) / len(scores)
+        return 65  # Default when no data available
     
     def _calculate_emotional_score(self, user_data: Dict) -> float:
-        """Calculate emotional wellbeing from mood logs."""
+        """Calculate emotional wellbeing from mood logs and notes."""
         scores = []
         
-        for log in user_data["health_logs"][-30:]:
-            mood_raw = log.get("mood", "5")
-            try:
-                # Try to parse as numeric (1-10 scale)
-                mood_val = float(mood_raw)
-                mood_score = (mood_val / 10) * 100
-            except:
-                # If not numeric, use string mapping
-                mood_map = {"1": 10, "2": 20, "3": 30, "4": 40, "5": 50, "6": 60, "7": 70, "8": 80, "9": 90, "10": 100}
-                mood_score = mood_map.get(str(mood_raw), 60)
-            
-            scores.append(mood_score)
+        health_logs = user_data.get("health_logs", [])
+        if health_logs:
+            for log in health_logs[-30:]:
+                mood_raw = log.get("mood", "5")
+                try:
+                    # Try to parse as numeric (1-10 scale)
+                    mood_val = float(mood_raw)
+                    mood_score = (mood_val / 10) * 100
+                except:
+                    # If not numeric, use string mapping
+                    mood_map = {"1": 10, "2": 20, "3": 30, "4": 40, "5": 50, "6": 60, "7": 70, "8": 80, "9": 90, "10": 100}
+                    mood_score = mood_map.get(str(mood_raw), 60)
+                
+                scores.append(mood_score)
         
-        return sum(scores) / len(scores) if scores else 60
+        # Check notes for emotional indicators
+        for log in health_logs[-30:] if health_logs else []:
+            notes = log.get("notes", "").lower()
+            if notes:
+                if any(word in notes for word in ["happy", "great", "awesome", "excited", "joyful"]):
+                    scores.append(85)
+                elif any(word in notes for word in ["sad", "anxious", "stressed", "depressed", "overwhelmed"]):
+                    scores.append(40)
+        
+        if scores:
+            return sum(scores) / len(scores)
+        return 65  # Neutral default
     
     def _calculate_metabolic_score(self, user_data: Dict) -> float:
-        """Calculate metabolic health from biomarkers."""
+        """Calculate metabolic health from biomarkers and activity."""
         scores = []
         
-        for report in user_data["lab_reports"]:
+        # Check lab reports
+        lab_reports = user_data.get("lab_reports", [])
+        for report in lab_reports:
             # Base score for having lab work done
-            scores.append(75)
+            biomarkers = report.get("biomarkers", {})
+            if biomarkers:
+                scores.append(75)  # Has biomarker data
+        
+        # Estimate from activity data (consistent activity = healthy metabolism)
+        terra_data = user_data.get("terra_activity_data", [])
+        if terra_data and not scores:
+            calorie_counts = []
+            for record in terra_data[-30:]:
+                try:
+                    payload = record.get("payload", {})
+                    if isinstance(payload, str):
+                        import json
+                        payload = json.loads(payload)
+                    calories = payload.get("calories_burned", 0) or payload.get("energy_expended", 0)
+                    if calories > 0:
+                        calorie_counts.append(calories)
+                except:
+                    pass
             
-            # Could parse biomarkers here for more accuracy
-            # For now, return average lab-based score
+            if calorie_counts:
+                avg_calories = sum(calorie_counts) / len(calorie_counts)
+                if avg_calories > 2000:
+                    scores.append(75)
+                elif avg_calories > 1500:
+                    scores.append(65)
+                else:
+                    scores.append(55)
         
         if scores:
             return sum(scores) / len(scores)
         
-        # Default if no lab data
-        return 60
+        # Default if no data
+        return 65
     
     def _calculate_reproductive_score(self, user_data: Dict) -> float:
         """Calculate reproductive health from cycle regularity."""
@@ -629,8 +1006,7 @@ Format your response as JSON with keys: summary, strengths, areas_to_focus, reco
             response = self.claude.chat(
                 messages=[{"role": "user", "content": prompt}],
                 system="You are a health analytics AI expert. Provide concise, data-driven insights about vitality and wellness. Be realistic about limited data scenarios.",
-                max_tokens=1000,
-                temperature=0.7
+                max_tokens=1000
             )
             
             # Parse response
@@ -751,142 +1127,668 @@ class LifeArcService:
         self.db_query = mock_query_db if USE_MOCK_DATA else query_db
     
     def get_life_arc_timeline(self) -> LifeArcResponse:
-        """Generate complete life arc timeline."""
+        """Generate complete life arc timeline with enhanced milestones."""
+        print(f"[LIFE_ARC] START get_life_arc_timeline user_id={self.user_id}")
         try:
-            # Detect milestones
+            # Check eligibility first
+            eligibility_status, is_eligible = self._check_eligibility()
+            print(f"[LIFE_ARC] Eligibility: {eligibility_status}")
+            
+            # If not eligible, return empty response
+            if not is_eligible:
+                print(f"[LIFE_ARC] User not eligible - returning empty milestones")
+                return LifeArcResponse(
+                    milestones=[],
+                    timeline_summary=TimelineSummary(
+                        total_milestones=0,
+                        major_events=0,
+                        avg_monthly_milestones=0,
+                        date_range={"start": date.today(), "end": date.today()}
+                    )
+                )
+            
+            # Detect milestones from all sources
             milestones = self._detect_milestones()
+            print(f"[LIFE_ARC] Detected {len(milestones)} milestones")
             
             # Sort by date (reverse chronological)
-            milestones = sorted(milestones, key=lambda m: m.milestone_date, reverse=True)
+            milestones = sorted(milestones, key=lambda m: m.date_, reverse=True)
             
             # Calculate summary
             summary = self._calculate_timeline_summary(milestones)
             
-            return LifeArcResponse(
+            response = LifeArcResponse(
                 milestones=milestones,
                 timeline_summary=summary
             )
+            print(f"[LIFE_ARC] SUCCESS returning {len(milestones)} milestones")
+            return response
         except Exception as e:
             logger.error(f"Error generating life arc: {e}")
-            return LifeArcResponse(milestones=[], timeline_summary=TimelineSummary(
-                total_milestones=0,
-                major_events=0,
-                avg_monthly_milestones=0,
-                date_range={"start": date.today(), "end": date.today()}
+            print(f"[LIFE_ARC] ERROR: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return LifeArcResponse(
+                milestones=[],
+                timeline_summary=TimelineSummary(
+                    total_milestones=0,
+                    major_events=0,
+                    avg_monthly_milestones=0,
+                    date_range={"start": date.today(), "end": date.today()}
+                )
+            )
+    
+    # ========== HELPER METHODS ==========
+    
+    def _check_eligibility(self) -> tuple:
+        """Check if user has sufficient data for life-arc timeline.
+        
+        Milestones are detected from 6 different tables (menstrual_cycles,
+        health_logs, lab_reports, terra_activity_data, health_goal_profile,
+        profiles/life_journeys), so eligibility must consider all of them -
+        not just cycles. Otherwise users without period-tracking data (e.g.
+        pregnancy/postpartum, perimenopause) are wrongly blocked.
+        
+        MVP Threshold (Testing):
+        - At least 1 record in ANY milestone data source
+        
+        Returns:
+            (status: str, is_eligible: bool)
+            - status: "eligible", "needs_more_data", or "check_failed"
+            - is_eligible: True if user meets requirements
+        """
+        try:
+            query = """
+                SELECT
+                    (SELECT COUNT(*) FROM menstrual_cycles WHERE user_id = %s) AS cycle_count,
+                    (SELECT COUNT(*) FROM health_logs WHERE user_id = %s) AS health_log_count,
+                    (SELECT COUNT(*) FROM lab_reports WHERE user_id = %s) AS lab_report_count,
+                    (SELECT COUNT(*) FROM terra_activity_data WHERE user_id = %s) AS activity_count,
+                    (SELECT COUNT(*) FROM health_goal_profile hgp
+                        JOIN profiles p ON hgp.profile_id = p.id
+                        WHERE p.user_id = %s) AS health_goal_count,
+                    (SELECT COUNT(*) FROM profiles WHERE user_id = %s AND life_stage_id IS NOT NULL) AS life_stage_count
+            """
+            params = (self.user_id,) * 6
+            result = self.db_query(query, params)
+            result = result[0] if result else {}
+            
+            total_signals = sum(result.get(k, 0) or 0 for k in (
+                "cycle_count", "health_log_count", "lab_report_count",
+                "activity_count", "health_goal_count", "life_stage_count",
             ))
+            
+            print(f"[LIFE_ARC] Eligibility check: {result} (total_signals={total_signals})")
+            
+            if total_signals < 1:
+                print(f"[LIFE_ARC] No milestone data found across any source - needs more data")
+                return ("needs_more_data", False)
+            
+            print(f"[LIFE_ARC] User is eligible! (total_signals={total_signals})")
+            return ("eligible", True)
+            
+        except Exception as e:
+            logger.error(f"[LIFE_ARC] Error checking eligibility: {e}")
+            print(f"[LIFE_ARC] Error checking eligibility: {e}")
+            return ("check_failed", False)
+    
+    def _calculate_phase(self, cycle_day: int, cycle_length: int = 28) -> str:
+        """Map cycle day to reproductive phase."""
+        if 1 <= cycle_day <= 5:
+            return "menstrual"
+        elif 6 <= cycle_day <= 12:
+            return "follicular"
+        elif 13 <= cycle_day <= 15:
+            return "ovulatory"
+        else:
+            return "luteal"
+    
+    def _calculate_cycle_day(self, period_start_date: date, reference_date: date = None) -> int:
+        """Calculate cycle day from last menstrual period.
+        
+        Args:
+            period_start_date: Start date of menstrual cycle
+            reference_date: Date to calculate from (default: today)
+        """
+        if not period_start_date:
+            return 1
+        if reference_date is None:
+            reference_date = datetime.now().date()
+        days_since = (reference_date - period_start_date).days
+        return max(1, (days_since % 28) + 1)  # Assume 28-day cycle
+    
+    def _calculate_significance(self, milestone_type: str, context: dict = None) -> float:
+        """Calculate dynamic significance score 0.3-1.0 based on milestone type and context."""
+        context = context or {}
+        
+        # Base significance by type
+        base_significance = {
+            "cycle_start": 0.4,
+            "phase_transition": 0.5,
+            "health_achievement": 0.75,
+            "vitality_surge": 0.8,
+            "symptom_resolution": 0.6,
+            "cycle_anomaly": 0.35,
+            "lab_result": 0.85,
+            "health_goal_completed": 0.9,
+            "health_goal_progress": 0.7
+        }
+        
+        significance = base_significance.get(milestone_type, 0.5)
+        
+        # Boost for major improvements
+        if context.get("vitality_change", 0) > 20:
+            significance = min(significance + 0.2, 1.0)
+        
+        # Reduce for expected routine events
+        if milestone_type == "cycle_start" and context.get("is_regular_cycle"):
+            significance = 0.35
+        
+        return round(significance, 2)
+    
+    def _populate_health_context(self, milestone_type: str, cycle_data: dict = None, health_logs: list = None, milestone_date: date = None) -> dict:
+        """Populate health context fields with calculated data.
+        
+        Args:
+            milestone_type: Type of milestone
+            cycle_data: Cycle information dict
+            health_logs: Health logs (unused)
+            milestone_date: Date of milestone (used for historical cycle_day calculation)
+        """
+        context = {
+            "cycle_day": None,
+            "phase": None,
+            "duration": None,
+            "progress": None,
+            "status": None,
+            "key_findings": [],
+            "goal_progress": None
+        }
+        
+        if not cycle_data:
+            return context
+        
+        # Calculate cycle day and phase
+        period_start = cycle_data.get("period_start_date")
+        cycle_length = cycle_data.get("cycle_length") or 28
+        period_length = cycle_data.get("period_length") or 5
+        
+        if period_start:
+            cycle_day = self._calculate_cycle_day(period_start, milestone_date)
+            phase = self._calculate_phase(cycle_day, cycle_length)
+            progress = round((cycle_day / cycle_length) * 100, 1)
+            
+            context["cycle_day"] = cycle_day
+            context["phase"] = phase
+            context["duration"] = f"{cycle_length} days average"
+            context["progress"] = f"{progress}%"  # Convert to string with % symbol
+            
+            # Determine status based on phase
+            if phase == "menstrual":
+                context["status"] = "Menstrual phase"
+            elif phase == "follicular":
+                context["status"] = "Rising energy - follicular phase"
+            elif phase == "ovulatory":
+                context["status"] = "Peak energy - ovulatory phase"
+            else:
+                context["status"] = "Luteal phase - self-care focus"
+            
+            # Add key findings
+            context["key_findings"] = [
+                f"Cycle day {cycle_day} of {cycle_length}",
+                f"Phase: {phase.title()}"
+            ]
+            
+            if cycle_data.get("confirmed_ovulation_day"):
+                context["key_findings"].append(f"Ovulation confirmed on day {cycle_data['confirmed_ovulation_day']}")
+        
+        return context
     
     def _detect_milestones(self) -> List[Milestone]:
-        """Detect all health milestones."""
+        """Detect all health milestones from multiple sources."""
         milestones = []
         cutoff_date = datetime.now() - timedelta(days=self.months_back * 30)
         
-        # 1. Cycle-related milestones
+        # 1. Enhanced cycle-related milestones
         cycle_milestones = self._detect_cycle_milestones(cutoff_date)
         milestones.extend(cycle_milestones)
         
-        # 2. Health goal milestones
+        # 2. Phase transitions
+        phase_milestones = self._detect_phase_transitions(cutoff_date)
+        milestones.extend(phase_milestones)
+        
+        # 3. Health achievements (from activity/health logs)
+        achievement_milestones = self._detect_health_achievements(cutoff_date)
+        milestones.extend(achievement_milestones)
+        
+        # 4. Symptom resolutions
+        symptom_milestones = self._detect_symptom_resolutions(cutoff_date)
+        milestones.extend(symptom_milestones)
+        
+        # 5. Cycle anomalies
+        anomaly_milestones = self._detect_cycle_anomalies(cutoff_date)
+        milestones.extend(anomaly_milestones)
+        
+        # 6. Health goal milestones
         goal_milestones = self._detect_health_goal_milestones(cutoff_date)
         milestones.extend(goal_milestones)
         
-        # 3. Lab result milestones
+        # 7. Lab result milestones
         lab_milestones = self._detect_lab_milestones(cutoff_date)
         milestones.extend(lab_milestones)
         
-        # 4. Life stage transitions
+        # 8. Life stage milestones
         life_stage_milestones = self._detect_life_stage_milestones(cutoff_date)
         milestones.extend(life_stage_milestones)
         
-        # Log before filtering
-        logger.debug(f"User {self.user_id}: Detected {len(cycle_milestones)} cycle, {len(goal_milestones)} goal, {len(lab_milestones)} lab, {len(life_stage_milestones)} life_stage milestones")
+        # 9. Health insights from AI analyses
+        insight_milestones = self._detect_health_insights(cutoff_date)
+        milestones.extend(insight_milestones)
+        
+        logger.debug(f"[LIFE_ARC] User {self.user_id}: Detected {len(cycle_milestones)} cycle, "
+                    f"{len(phase_milestones)} phase, {len(achievement_milestones)} achievement, "
+                    f"{len(symptom_milestones)} symptom, {len(anomaly_milestones)} anomaly, "
+                    f"{len(goal_milestones)} goal, {len(lab_milestones)} lab, "
+                    f"{len(life_stage_milestones)} life_stage, {len(insight_milestones)} insight milestones")
         
         # Filter out low-significance events
         milestones_before = len(milestones)
         milestones = [m for m in milestones if m.significance >= 0.3]
-        logger.debug(f"User {self.user_id}: After filtering: {milestones_before} -> {len(milestones)} milestones")
+        logger.debug(f"[LIFE_ARC] User {self.user_id}: After filtering: {milestones_before} -> {len(milestones)} milestones")
         
         return milestones
     
     def _detect_cycle_milestones(self, cutoff_date: datetime) -> List[Milestone]:
-        """Detect menstrual cycle milestones."""
+        """Detect menstrual cycle milestones with full health context."""
         milestones = []
         
         try:
             query = """
-                SELECT period_start_date, current_phase, cycle_length
+                SELECT 
+                    id, period_start_date, period_end_date, cycle_length, period_length,
+                    current_cycle_day, current_phase, predicted_ovulation_day, confirmed_ovulation_day,
+                    fertile_start_day, fertile_end_day, is_completed, created_at
                 FROM menstrual_cycles
                 WHERE user_id = %s AND period_start_date >= DATE(%s)
                 ORDER BY period_start_date DESC
                 LIMIT 20
             """
             cycles = self.db_query(query, (self.user_id, cutoff_date.date()))
+            print(f"[LIFE_ARC] Found {len(cycles)} cycles for user {self.user_id}")
             
             for cycle in cycles:
-                if cycle.get("period_start_date"):
-                    milestones.append(Milestone(
-                        milestone_date=cycle["period_start_date"],
-                        milestone_type="cycle_start",
-                        title="Period Started",
-                        description=f"New menstrual cycle began. Phase: {cycle.get('current_phase', 'menstrual')}.",
-                        significance=0.6,
-                        icon="flow",
-                        health_context=MilestoneHealthContext(
-                            cycle_day=1,
-                            phase=cycle.get("current_phase"),
-                            duration=f"{cycle.get('cycle_length', 28)} days average"
-                        )
-                    ))
+                if not cycle.get("period_start_date"):
+                    continue
+                
+                period_start = cycle["period_start_date"]
+                if hasattr(period_start, 'date'):
+                    period_start = period_start.date()
+                
+                # Calculate current cycle stats
+                cycle_day = self._calculate_cycle_day(period_start)
+                phase = self._calculate_phase(cycle_day, cycle.get("cycle_length", 28))
+                
+                # Populate health context
+                health_context = self._populate_health_context("cycle_start", cycle, milestone_date=period_start)
+                
+                # Calculate significance
+                is_regular = (datetime.now().date() - period_start).days % 28 < 5
+                significance = self._calculate_significance("cycle_start", {"is_regular_cycle": is_regular})
+                
+                description = f"New menstrual cycle began. Phase: {phase.title()}."
+                if cycle.get("predicted_ovulation_day"):
+                    description += f" Ovulation predicted on day {cycle['predicted_ovulation_day']}."
+                if cycle.get("fertile_start_day") and cycle.get("fertile_end_day"):
+                    description += f" Fertile window: days {cycle['fertile_start_day']}-{cycle['fertile_end_day']}."
+                
+                milestones.append(Milestone(
+                    date_=period_start,
+                    type_="cycle_start",
+                    title="Period Started",
+                    description=description,
+                    significance=significance,
+                    icon="flow",
+                    health_context=MilestoneHealthContext(**health_context)
+                ))
         except Exception as e:
-            logger.error(f"Error detecting cycle milestones: {e}")
+            logger.error(f"[LIFE_ARC] Error detecting cycle milestones: {e}")
+            print(f"[LIFE_ARC] Error detecting cycle milestones: {e}")
+            import traceback
+            print(traceback.format_exc())
         
         return milestones
     
-    def _detect_health_goal_milestones(self, cutoff_date: datetime) -> List[Milestone]:
-        """Detect health goal achievements."""
+    def _detect_phase_transitions(self, cutoff_date: datetime) -> List[Milestone]:
+        """Detect phase transition milestones (calculated based on cycle dates)."""
+        milestones = []
+        
+        try:
+            # Get recent cycles to calculate phase transitions
+            query = """
+                SELECT period_start_date, cycle_length, predicted_ovulation_day
+                FROM menstrual_cycles
+                WHERE user_id = %s AND period_start_date >= DATE(%s)
+                ORDER BY period_start_date DESC
+                LIMIT 10
+            """
+            cycles = self.db_query(query, (self.user_id, cutoff_date.date()))
+            
+            for cycle in cycles:
+                if not cycle.get("period_start_date"):
+                    continue
+                
+                period_start = cycle["period_start_date"]
+                if not period_start:
+                    continue
+                    
+                if hasattr(period_start, 'date'):
+                    period_start = period_start.date()
+                
+                cycle_length = cycle.get("cycle_length") or 28
+                ovulation_day = cycle.get("predicted_ovulation_day")
+                if not ovulation_day:
+                    ovulation_day = 14
+                
+                # Follicular to Ovulatory transition (around day 13)
+                try:
+                    follicular_end = period_start + timedelta(days=ovulation_day - 1)
+                except (TypeError, ValueError):
+                    continue
+                    
+                if cutoff_date.date() <= follicular_end <= datetime.now().date():
+                    # Use populate function to get full context including duration/progress
+                    health_context = self._populate_health_context("phase_transition", cycle, milestone_date=follicular_end)
+                    # Override with phase-specific status and findings
+                    health_context["status"] = "Energy peak - ovulation begins"
+                    health_context["key_findings"] = [
+                        f"Ovulation begins on cycle day {ovulation_day}",
+                        "Expect peak energy and fertility"
+                    ]
+                    
+                    milestones.append(Milestone(
+                        date_=follicular_end,
+                        type_="phase_transition",
+                        title="Ovulatory Phase Begins",
+                        description="Transition to ovulatory phase. Peak energy expected.",
+                        significance=self._calculate_significance("phase_transition"),
+                        icon="moon",
+                        health_context=MilestoneHealthContext(**health_context)
+                    ))
+                
+                # Ovulatory to Luteal transition (around day 16)
+                try:
+                    luteal_start = period_start + timedelta(days=ovulation_day + 1)
+                except (TypeError, ValueError):
+                    continue
+                    
+                if cutoff_date.date() <= luteal_start <= datetime.now().date():
+                    # Use populate function to get full context including duration/progress
+                    health_context = self._populate_health_context("phase_transition", cycle, milestone_date=luteal_start)
+                    # Override with phase-specific status and findings
+                    health_context["status"] = "Luteal phase - self-care focus"
+                    health_context["key_findings"] = [
+                        "Ovulation completed",
+                        "Energy may gradually decrease - plan accordingly"
+                    ]
+                    
+                    milestones.append(Milestone(
+                        date_=luteal_start,
+                        type_="phase_transition",
+                        title="Luteal Phase Begins",
+                        description="Transition to luteal phase. Energy may dip - focus on self-care.",
+                        significance=self._calculate_significance("phase_transition"),
+                        icon="moon",
+                        health_context=MilestoneHealthContext(**health_context)
+                    ))
+        except Exception as e:
+            logger.error(f"[LIFE_ARC] Error detecting phase transitions: {e}")
+        
+        return milestones
+    
+    def _detect_health_achievements(self, cutoff_date: datetime) -> List[Milestone]:
+        """Detect health achievements (activity streaks, goal progress, etc.)."""
+        milestones = []
+        
+        try:
+            # Look for activity patterns in terra_activity_data
+            query = """
+                SELECT DATE(created_at) as activity_date, COUNT(*) as activity_count
+                FROM terra_activity_data
+                WHERE user_id = %s AND created_at >= %s
+                GROUP BY DATE(created_at)
+                ORDER BY activity_date DESC
+            """
+            activities = self.db_query(query, (self.user_id, cutoff_date))
+            
+            if activities and len(activities) >= 7:
+                # Calculate consecutive activity days
+                consecutive_days = 0
+                for i in range(len(activities) - 1):
+                    current_date = activities[i]["activity_date"]
+                    next_date = activities[i + 1]["activity_date"]
+                    
+                    if hasattr(current_date, 'date'):
+                        current_date = current_date.date()
+                    if hasattr(next_date, 'date'):
+                        next_date = next_date.date()
+                    
+                    days_diff = (current_date - next_date).days
+                    if days_diff == 1:
+                        consecutive_days += 1
+                    else:
+                        consecutive_days = 0
+                    
+                    # 7-day streak milestone
+                    if consecutive_days >= 6:  # 7 consecutive days
+                        streak_start = current_date - timedelta(days=consecutive_days)
+                        health_context = {
+                            "status": "Active",
+                            "key_findings": [
+                                f"7-day activity streak achieved",
+                                "Consistent engagement with health tracking"
+                            ],
+                            "goal_progress": 100.0
+                        }
+                        
+                        milestones.append(Milestone(
+                            date_=current_date,
+                            type_="health_achievement",
+                            title="7-Day Activity Streak",
+                            description="Completed 7 consecutive days of activity tracking. Great consistency!",
+                            significance=self._calculate_significance("health_achievement"),
+                            icon="checkmark",
+                            health_context=MilestoneHealthContext(**health_context)
+                        ))
+                        break
+        except Exception as e:
+            logger.error(f"[LIFE_ARC] Error detecting health achievements: {e}")
+        
+        return milestones
+    
+    def _detect_symptom_resolutions(self, cutoff_date: datetime) -> List[Milestone]:
+        """Detect symptom resolution milestones."""
+        milestones = []
+        
+        try:
+            # Look for symptom patterns in health_logs
+            query = """
+                SELECT log_date, symptoms, notes
+                FROM health_logs
+                WHERE user_id = %s AND log_date >= DATE(%s)
+                ORDER BY log_date DESC
+                LIMIT 60
+            """
+            logs = self.db_query(query, (self.user_id, cutoff_date.date()))
+            
+            if logs:
+                # Check for improvement patterns
+                recent_symptoms = set()
+                older_symptoms = set()
+                
+                for i, log in enumerate(logs):
+                    if log.get("symptoms"):
+                        try:
+                            symptoms = json.loads(log["symptoms"]) if isinstance(log["symptoms"], str) else log["symptoms"]
+                            if isinstance(symptoms, list):
+                                symptom_set = set(symptoms)
+                            else:
+                                symptom_set = {log["symptoms"]}
+                        except:
+                            symptom_set = {log["symptoms"]}
+                        
+                        if i < len(logs) // 2:
+                            recent_symptoms.update(symptom_set)
+                        else:
+                            older_symptoms.update(symptom_set)
+                
+                # Find resolved symptoms
+                resolved_symptoms = older_symptoms - recent_symptoms
+                if resolved_symptoms:
+                    # Clean up symptom names (remove JSON array notation if present)
+                    symptom_list = list(resolved_symptoms)
+                    clean_symptoms = []
+                    for s in symptom_list:
+                        if isinstance(s, str):
+                            # Remove all quotes, brackets, and escape characters (aggressive cleaning)
+                            import re
+                            s = re.sub(r'[\\\"\'"\[\]]', '', s)  # Remove all escape chars and quotes
+                            s = s.strip()  # Remove whitespace
+                            if s:  # Only add non-empty strings
+                                clean_symptoms.append(s)
+                    
+                    symptoms_text = ', '.join(clean_symptoms) if clean_symptoms else 'various symptoms'
+                    top_symptoms = ', '.join(clean_symptoms[:3]) if clean_symptoms else 'symptoms'
+                    
+                    health_context = {
+                        "status": "Improved",
+                        "key_findings": [
+                            f"No longer reporting: {top_symptoms}",
+                            "Positive health trend detected"
+                        ]
+                    }
+                    
+                    milestones.append(Milestone(
+                        date_=logs[0]["log_date"] if logs else datetime.now().date(),
+                        type_="symptom_resolution",
+                        title="Symptom Improvement",
+                        description=f"Successfully resolved symptoms including {symptoms_text}.",
+                        significance=self._calculate_significance("symptom_resolution"),
+                        icon="checkmark",
+                        health_context=MilestoneHealthContext(**health_context)
+                    ))
+        except Exception as e:
+            logger.error(f"[LIFE_ARC] Error detecting symptom resolutions: {e}")
+        
+        return milestones
+    
+    def _detect_cycle_anomalies(self, cutoff_date: datetime) -> List[Milestone]:
+        """Detect cycle length anomalies."""
         milestones = []
         
         try:
             query = """
-                SELECT goal_id, title, progress, start_date, status, category
-                FROM health_goals
-                WHERE user_id = %s AND start_date >= DATE(%s)
-                ORDER BY start_date DESC
+                SELECT period_start_date, cycle_length
+                FROM menstrual_cycles
+                WHERE user_id = %s AND period_start_date >= DATE(%s)
+                ORDER BY period_start_date DESC
+                LIMIT 5
             """
-            goals = self.db_query(query, (self.user_id, cutoff_date.date()))
-            logger.debug(f"User {self.user_id}: Found {len(goals)} health goals for health_goal_milestones")
+            cycles = self.db_query(query, (self.user_id, cutoff_date.date()))
+            
+            if len(cycles) >= 2:
+                # Calculate average cycle length
+                cycle_lengths = [c.get("cycle_length", 28) for c in cycles if c.get("cycle_length")]
+                if cycle_lengths:
+                    avg_length = sum(cycle_lengths) / len(cycle_lengths)
+                    
+                    # Check for deviations
+                    for cycle in cycles[:1]:  # Check most recent
+                        current_length = cycle.get("cycle_length", 28)
+                        deviation = abs(current_length - avg_length)
+                        
+                        if deviation > 3:  # More than 3 days deviation
+                            period_start = cycle["period_start_date"]
+                            if hasattr(period_start, 'date'):
+                                period_start = period_start.date()
+                            
+                            health_context = {
+                                "status": "Monitor",
+                                "key_findings": [
+                                    f"Cycle length: {current_length} days (average: {avg_length:.0f})",
+                                    f"Deviation: {deviation:.0f} days - monitor next cycle"
+                                ]
+                            }
+                            
+                            milestones.append(Milestone(
+                                date_=period_start,
+                                type_="cycle_anomaly",
+                                title="Cycle Length Variation",
+                                description=f"Cycle length ({current_length} days) differs from average ({avg_length:.0f} days). Monitor for pattern changes.",
+                                significance=self._calculate_significance("cycle_anomaly"),
+                                icon="alert",
+                                health_context=MilestoneHealthContext(**health_context)
+                            ))
+        except Exception as e:
+            logger.error(f"[LIFE_ARC] Error detecting cycle anomalies: {e}")
+        
+        return milestones
+    
+    def _detect_health_goal_milestones(self, cutoff_date: datetime) -> List[Milestone]:
+        """Detect health goal achievements via join table health_goal_profile."""
+        milestones = []
+        
+        try:
+            # Schema: health_goals → health_goal_profile (join) → profiles.user_id
+            # NOTE: Get ALL health goals assigned to user (no date filter - assignment date may predate cutoff)
+            logger.info(f"[LIFE_ARC_DEBUG] health_goal detection: Querying for user_id={self.user_id}")
+            
+            query = """
+                SELECT hg.id, hg.title, hg.status, hgp.created_at, hgp.updated_at
+                FROM health_goals hg
+                JOIN health_goal_profile hgp ON hg.id = hgp.health_goal_id
+                JOIN profiles p ON hgp.profile_id = p.id
+                WHERE p.user_id = %s
+                ORDER BY COALESCE(hgp.updated_at, hgp.created_at) DESC
+                LIMIT 20
+            """
+            goals = self.db_query(query, (self.user_id,))
+            goal_count = len(goals) if goals else 0
+            logger.info(f"[LIFE_ARC_DEBUG] health_goal query returned {goal_count} rows")
+            print(f"[HEALTH_GOAL_DEBUG] Query returned {goal_count} rows for user_id={self.user_id}")
+            
+            if goals:
+                for i, g in enumerate(goals[:3]):  # Print first 3
+                    print(f"  Goal {i+1}: id={g.get('id')}, title={g.get('title')}, created_at={g.get('created_at')}, updated_at={g.get('updated_at')}")
+            
+            logger.debug(f"[LIFE_ARC] User {self.user_id}: Found {goal_count} health goals")
             
             for goal in goals:
-                progress = goal.get("progress", 0)
-                
-                # Milestone for goal completion
-                if progress == 100 or goal.get("status") == "completed":
-                    significance = 0.9
-                    description = f"Completed {goal['title']}! Major health achievement."
-                    milestone_type = "health_goal_completed"
-                # Milestone for significant progress
-                elif progress >= 50:
-                    significance = 0.7
-                    description = f"Made significant progress on {goal['title']} ({progress}%)"
-                    milestone_type = "health_goal_progress"
-                else:
+                # Use updated_at if created_at is NULL (fallback pattern)
+                goal_date = goal.get("created_at") or goal.get("updated_at")
+                if not goal_date:
+                    logger.warning(f"[LIFE_ARC] Goal {goal.get('id')} has no created_at or updated_at")
                     continue
                 
-                if goal.get("start_date"):
-                    milestone_date = goal["start_date"].date() if hasattr(goal["start_date"], "date") else goal["start_date"]
-                    
-                    milestones.append(Milestone(
-                        milestone_date=milestone_date,
-                        milestone_type=milestone_type,
-                        title=goal["title"],
-                        description=description,
-                        significance=significance,
-                        icon="target",
-                        health_context=MilestoneHealthContext(
-                            progress=f"{progress}%",
-                            goal_progress=float(progress)
-                        )
-                    ))
+                goal_date = goal_date.date() if hasattr(goal_date, "date") else goal_date
+                
+                # Status: 1 = active, 0 = completed/inactive
+                status = "Completed" if goal.get("status") == 0 else "In Progress"
+                significance = 0.6
+                
+                milestones.append(Milestone(
+                    date_=goal_date,
+                    type_="health_goal",
+                    title=goal.get("title", "Health Goal"),
+                    description=f"Health goal: {goal.get('title', 'Unnamed')}. Status: {status}.",
+                    significance=significance,
+                    icon="target",
+                    health_context=MilestoneHealthContext(
+                        status=status,
+                        key_findings=[f"Goal: {goal.get('title', 'Unnamed')}", f"Status: {status}"]
+                    )
+                ))
         except Exception as e:
-            logger.error(f"Error detecting goal milestones: {e}")
+            logger.error(f"[LIFE_ARC] Error detecting goal milestones: {e}")
         
         return milestones
     
@@ -915,8 +1817,8 @@ class LifeArcService:
                     description += " Results show normal hormone levels." if status == "normal" else " Results require attention."
                 
                 milestones.append(Milestone(
-                    milestone_date=report["created_at"].date() if hasattr(report["created_at"], "date") else report["created_at"],
-                    milestone_type="lab_result",
+                    date_=report["created_at"].date() if hasattr(report["created_at"], "date") else report["created_at"],
+                    type_="lab_result",
                     title=test_type,
                     description=description,
                     significance=significance,
@@ -932,59 +1834,176 @@ class LifeArcService:
         return milestones
     
     def _detect_life_stage_milestones(self, cutoff_date: datetime) -> List[Milestone]:
-        """Detect life stage transitions and wellness achievements."""
+        """Detect life stage transitions from user profiles linked to life_journeys."""
         milestones = []
         
         try:
-            query = """
-                SELECT journey_id, title, milestone_date, description, status, journey_type, category
-                FROM life_journeys
-                WHERE user_id = %s AND milestone_date >= DATE(%s)
-                ORDER BY milestone_date DESC
-            """
-            journeys = self.db_query(query, (self.user_id, cutoff_date.date()))
-            logger.debug(f"User {self.user_id}: Found {len(journeys)} life journeys for life_stage_milestones")
+            # Schema: profiles.user_id + profiles.life_stage_id → life_journeys.id
+            # Get user's profile(s) with life stage reference
+            # NOTE: Get ALL life stages assigned to user (no date filter - assignment may predate cutoff)
+            logger.info(f"[LIFE_ARC_DEBUG] life_stage detection: Querying for user_id={self.user_id}")
             
-            for journey in journeys:
-                journey_type = journey.get("journey_type", "life_stage_transition")
-                status = journey.get("status", "completed")
+            query = """
+                SELECT p.id, p.created_at, p.updated_at, lj.id as journey_id, lj.icon, lj.title, 
+                       lj.subtitle, lj.description, lj.status, lj.created_at as journey_created_at
+                FROM profiles p
+                LEFT JOIN life_journeys lj ON p.life_stage_id = lj.id
+                WHERE p.user_id = %s AND p.life_stage_id IS NOT NULL
+                ORDER BY COALESCE(lj.created_at, p.updated_at) DESC
+                LIMIT 20
+            """
+            stages = self.db_query(query, (self.user_id,))
+            stage_count = len(stages) if stages else 0
+            logger.info(f"[LIFE_ARC_DEBUG] life_stage query returned {stage_count} rows")
+            print(f"[LIFE_STAGE_DEBUG] Query returned {stage_count} rows for user_id={self.user_id}")
+            
+            if stages:
+                for i, s in enumerate(stages[:3]):  # Print first 3
+                    print(f"  Stage {i+1}: journey_id={s.get('journey_id')}, title={s.get('title')}, updated_at={s.get('updated_at')}")
+            
+            logger.debug(f"[LIFE_ARC] User {self.user_id}: Found {stage_count} life stage transitions")
+            
+            for stage in stages:
+                journey_id = stage.get("journey_id")
+                if not journey_id:
+                    continue  # Skip profiles with no life_journey set
                 
-                # Determine significance and icon based on journey type
-                if "postmenopause" in journey_type.lower() or "perimenopause" in journey_type.lower():
+                # Use profile updated_at or journey created_at as milestone date
+                milestone_date = stage.get("created_at") or stage.get("updated_at")
+                if not milestone_date:
+                    continue
+                
+                milestone_date = milestone_date.date() if hasattr(milestone_date, "date") else milestone_date
+                
+                title = stage.get("title", "Life Stage Transition")
+                description = stage.get("description") or stage.get("subtitle") or f"Life stage: {title}"
+                status = "Completed" if stage.get("status") == 0 else "In Progress"
+                
+                # Determine significance based on life stage type.
+                # NOTE: lj.icon holds a full image URL, not a short icon key - never use it directly.
+                significance = 0.75
+                icon = "journey"
+                
+                if any(x in title.lower() for x in ["perimenopause", "menopause", "postmenopause"]):
                     significance = 0.95  # Major life transition
                     icon = "health"
-                elif "wellness_achievement" in journey_type.lower():
-                    significance = 0.85
-                    icon = "trophy"
-                elif "screening" in journey_type.lower():
-                    significance = 0.8
-                    icon = "test"
-                else:
-                    significance = 0.8
-                    icon = "journey"
+                elif any(x in title.lower() for x in ["pregnancy", "postpartum", "postpregn"]):
+                    significance = 0.9
+                    icon = "health"
                 
-                if journey.get("milestone_date"):
-                    milestone_date = journey["milestone_date"].date() if hasattr(journey["milestone_date"], "date") else journey["milestone_date"]
-                    
-                    milestones.append(Milestone(
-                        milestone_date=milestone_date,
-                        milestone_type=journey_type,
-                        title=journey["title"],
-                        description=journey.get("description", f"Beginning {journey['title']} health journey"),
-                        significance=significance,
-                        icon=icon,
-                        health_context=MilestoneHealthContext(
-                            status=status,
-                            key_findings=[f"Status: {status}"]
-                        )
-                    ))
+                milestones.append(Milestone(
+                    date_=milestone_date,
+                    type_="life_stage",
+                    title=title,
+                    description=description,
+                    significance=significance,
+                    icon=icon,
+                    health_context=MilestoneHealthContext(
+                        status=status,
+                        key_findings=[f"Life Stage: {title}", f"Status: {status}"]
+                    )
+                ))
         except Exception as e:
-            logger.error(f"Error detecting life stage milestones: {e}")
+            logger.error(f"[LIFE_ARC] Error detecting life stage milestones: {e}")
         
         return milestones
     
+    def _detect_health_insights(self, cutoff_date: datetime) -> List[Milestone]:
+        """Detect health insights from smart analyses (AI-generated insights)."""
+        milestones = []
+        
+        try:
+            # smart_analyses table schema: id, user_id, title, alerts (json), status, created_at, updated_at
+            # Missing: category, insight_summary, analysis_date
+            # Using created_at as analysis_date, using title as category placeholder
+            query = """
+                SELECT id, title, alerts, status, created_at
+                FROM smart_analyses
+                WHERE user_id = %s AND created_at >= %s
+                ORDER BY created_at DESC
+                LIMIT 30
+            """
+            analyses = self.db_query(query, (self.user_id, cutoff_date))
+            logger.debug(f"User {self.user_id}: Found {len(analyses)} smart analyses for health insights")
+            
+            for analysis in analyses:
+                if not analysis.get("created_at"):
+                    continue
+                
+                title = analysis.get("title", "AI Analysis")
+                alerts = analysis.get("alerts")
+                
+                # Parse alerts if it's a JSON string/array
+                alert_list = []
+                if alerts:
+                    try:
+                        if isinstance(alerts, str):
+                            # Try to parse as JSON
+                            alert_list = json.loads(alerts) if alerts.startswith('[') or alerts.startswith('{') else [alerts]
+                        elif isinstance(alerts, list):
+                            alert_list = alerts
+                        elif isinstance(alerts, dict):
+                            alert_list = [alerts]
+                    except:
+                        alert_list = [str(alerts)] if alerts else []
+                
+                # Create milestone if there are alerts
+                if alert_list:
+                    # Use title as category placeholder since table doesn't have category column
+                    category = title.lower().replace(" ", "_") if title else "general"
+                    
+                    # Map category to icon
+                    icon_map = {
+                        "fertility": "target",
+                        "sleep_energy": "moon",
+                        "skin_hydration": "droplet",
+                        "mood": "heart",
+                        "hormone": "heart",
+                        "nutrition": "apple",
+                        "fitness": "activity",
+                        "general": "lightbulb",
+                        "smart_alerts": "bell",
+                        "ai_analysis": "lightbulb"
+                    }
+                    
+                    icon = icon_map.get(category, "lightbulb")
+                    
+                    # Create description from alerts
+                    alert_text = ', '.join(str(a) for a in alert_list[:3])
+                    description = f"AI Analysis: {title}. Key findings: {alert_text}."
+                    
+                    milestone_date = analysis["created_at"]
+                    if hasattr(milestone_date, 'date'):
+                        milestone_date = milestone_date.date()
+                    
+                    milestones.append(Milestone(
+                        date_=milestone_date,
+                        type_="health_insight",
+                        title=f"{title} Insight",
+                        description=description,
+                        significance=0.65,  # Moderate significance for AI insights
+                        icon=icon,
+                        health_context=MilestoneHealthContext(
+                            status=f"{title} analysis completed",
+                            key_findings=alert_list[:3] if alert_list else []
+                        )
+                    ))
+        except Exception as e:
+            logger.error(f"Error detecting health insights: {e}")
+            print(f"[LIFE_ARC] Error detecting health insights: {e}")
+        
+        return milestones
+    
+    def _generate_timeline_insights(self, milestones: List[Milestone]) -> Optional[VitalityAIInsights]:
+        """Generate Claude AI insights about the life arc timeline.
+        
+        Note: Currently disabled - UI does not display AI insights section.
+        Returns None to keep JSON clean.
+        """
+        return None
+    
     def _calculate_timeline_summary(self, milestones: List[Milestone]) -> TimelineSummary:
-        """Calculate timeline summary statistics."""
+        """Calculate timeline summary statistics with proper major events counting."""
         if not milestones:
             return TimelineSummary(
                 total_milestones=0,
@@ -993,11 +2012,11 @@ class LifeArcService:
                 date_range={"start": date.today(), "end": date.today()}
             )
         
-        # Count major events (significance >= 0.8)
-        major_events = sum(1 for m in milestones if m.significance >= 0.8)
+        # Count major events (significance >= 0.7 for better visibility)
+        major_events = sum(1 for m in milestones if m.significance >= 0.7)
         
         # Calculate date range
-        dates = [m.milestone_date for m in milestones]
+        dates = [m.date_ for m in milestones]
         start_date = min(dates)
         end_date = max(dates)
         
@@ -1005,6 +2024,8 @@ class LifeArcService:
         days_diff = (end_date - start_date).days
         months = max(1, days_diff / 30)
         avg_monthly = len(milestones) / months
+        
+        print(f"[LIFE_ARC] Timeline summary: {len(milestones)} total, {major_events} major, {avg_monthly:.1f} per month")
         
         return TimelineSummary(
             total_milestones=len(milestones),
@@ -1212,7 +2233,7 @@ class RemindersService:
             
             reminders.append(HealthReminder(
                 id=reminder_id,
-                type=screening_name,
+                type_=screening_name,
                 status=status,
                 priority=priority,
                 last_done=last_done,
