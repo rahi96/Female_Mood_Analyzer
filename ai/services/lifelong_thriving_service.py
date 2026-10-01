@@ -29,6 +29,65 @@ logger = logging.getLogger(__name__)
 # Flag to enable/disable mock data
 USE_MOCK_DATA = False  # Use real AWS RDS database
 
+# Testing threshold: 30 days (will change to 365 days in production). Shared
+# across all 4 Lifelong Thriving endpoints (Vitality, Life Arc, Reminders,
+# Mobility/Stress) so a new user sees one consistent "come back in N days"
+# rule instead of being blocked on one tab and getting full data on another.
+LIFELONG_THRIVING_ELIGIBILITY_DAYS_THRESHOLD = 30
+
+
+def check_account_age_eligibility(user_id: int) -> Tuple[bool, str]:
+    """Check if a user's account is old enough for any Lifelong Thriving endpoint.
+
+    Shared gate for Vitality/Life Arc/Reminders/Mobility-Stress - previously
+    only Vitality enforced this, so a brand-new account could be blocked on
+    /vitality but get full real-looking data from the other 3 endpoints.
+
+    Returns: (is_eligible: bool, message: str)
+    """
+    try:
+        db_query = mock_query_db if USE_MOCK_DATA else query_db
+
+        queries = [
+            "SELECT created_at FROM users WHERE id = %s",
+            "SELECT createdAt FROM users WHERE id = %s",
+            "SELECT created_date FROM users WHERE id = %s",
+        ]
+
+        result = None
+        created_at = None
+
+        for query in queries:
+            try:
+                result = db_query(query, (user_id,))
+                if result:
+                    created_at = result[0].get(list(result[0].keys())[0])
+                    break
+            except Exception:
+                continue
+
+        if not result or not created_at:
+            # Fail closed - a missing/unreadable created_at must not grant access.
+            return False, f"User {user_id} not found or account age could not be verified"
+
+        threshold_date = datetime.now() - timedelta(days=LIFELONG_THRIVING_ELIGIBILITY_DAYS_THRESHOLD)
+
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at)
+        elif isinstance(created_at, date) and not isinstance(created_at, datetime):
+            created_at = datetime.combine(created_at, datetime.min.time())
+
+        if created_at > threshold_date:
+            days_until_eligible = (threshold_date - created_at).days
+            return False, f"Account age requirement: Come back in {abs(days_until_eligible)} days"
+
+        return True, "User eligible"
+
+    except Exception as e:
+        logger.error(f"Error checking account age eligibility for user {user_id}: {e}")
+        # Fail closed - a broken eligibility check must not grant access.
+        return False, f"Eligibility check failed: {str(e)}"
+
 
 # ============================================================================
 # VITALITY SERVICE
@@ -58,69 +117,14 @@ class VitalityService:
     }
     
     # Testing threshold: 30 days (will change to 365 days in production)
-    ELIGIBILITY_DAYS_THRESHOLD = 30
-    
     def __init__(self, user_id: int, years_back: int = 6):
         self.user_id = user_id
         self.years_back = years_back
         self.claude = ClaudeLLM()
     
     def _check_user_eligibility(self) -> Tuple[bool, str]:
-        """
-        Check if user is eligible for Lifelong Thriving feature.
-        Requires: Account age >= ELIGIBILITY_DAYS_THRESHOLD (30 days for testing, 365 days for production)
-        
-        Returns: (is_eligible: bool, message: str)
-        """
-        try:
-            db_query = mock_query_db if USE_MOCK_DATA else query_db
-            
-            # Try multiple column name variants (created_at, createdAt, created_date)
-            queries = [
-                "SELECT created_at FROM users WHERE id = %s",
-                "SELECT createdAt FROM users WHERE id = %s",
-                "SELECT created_date FROM users WHERE id = %s",
-            ]
-            
-            result = None
-            created_at = None
-            
-            for attempt, query in enumerate(queries):
-                try:
-                    logger.info(f"   🔍 Eligibility attempt {attempt+1}: {query}")
-                    result = db_query(query, (self.user_id,))
-                    if result:
-                        created_at = result[0].get(list(result[0].keys())[0])  # Get first column value
-                        logger.info(f"   ✓ Found user with created_at: {created_at}")
-                        break
-                except Exception as e:
-                    logger.debug(f"   ⚠️  Query attempt {attempt+1} failed: {e}")
-                    continue
-            
-            if not result or not created_at:
-                # Fail closed - a missing/unreadable created_at must not grant
-                # access, otherwise the account-age gate is bypassed entirely.
-                logger.warning(f"   ⚠️  Could not verify user {self.user_id} eligibility - denying access")
-                return False, f"User {self.user_id} not found or account age could not be verified"
-            
-            # Check if account is old enough (30 days for testing)
-            threshold_date = datetime.now() - timedelta(days=self.ELIGIBILITY_DAYS_THRESHOLD)
-            
-            if isinstance(created_at, str):
-                created_at = datetime.fromisoformat(created_at)
-            elif isinstance(created_at, date) and not isinstance(created_at, datetime):
-                created_at = datetime.combine(created_at, datetime.min.time())
-            
-            if created_at > threshold_date:
-                days_until_eligible = (threshold_date - created_at).days
-                return False, f"Account age requirement: Come back in {abs(days_until_eligible)} days"
-            
-            return True, "User eligible"
-            
-        except Exception as e:
-            logger.error(f"Error checking user eligibility: {e}")
-            # Fail closed - a broken eligibility check must not grant access.
-            return False, f"Eligibility check failed: {str(e)}"
+        """Account-age gate, shared across all Lifelong Thriving endpoints."""
+        return check_account_age_eligibility(self.user_id)
     
     def _calculate_data_completeness(self, user_data: Dict) -> float:
         """
@@ -308,7 +312,11 @@ class VitalityService:
                 import traceback
                 logger.error(traceback.format_exc())
             
-            # Fetch health trends
+            # Fetch health trends - isolated try/except so a failure here
+            # (e.g. health_trends schema mismatch) can't abort the function
+            # and silently skip lab_reports/menstrual_cycles/profile below,
+            # which previously made every later dimension fall back to
+            # defaults even when that data genuinely existed in the DB.
             query = """
                 SELECT period, trend_data
                 FROM health_trends
@@ -316,7 +324,12 @@ class VitalityService:
                 ORDER BY period DESC
                 LIMIT 100
             """
-            data["health_trends"] = db_query(query, (self.user_id,))
+            try:
+                data["health_trends"] = db_query(query, (self.user_id,))
+                logger.info(f"   ✓ health_trends: {len(data['health_trends'])} records found")
+            except Exception as e:
+                logger.warning(f"   ⚠️  health_trends query failed: {e}")
+                data["health_trends"] = []
             
             # Fetch lab reports
             query = """
@@ -325,8 +338,12 @@ class VitalityService:
                 WHERE user_id = %s AND created_at >= DATE_SUB(NOW(), INTERVAL %s YEAR)
                 ORDER BY created_at DESC
             """
-            data["lab_reports"] = db_query(query, (self.user_id, self.years_back))
-            logger.info(f"   ✓ lab_reports: {len(data['lab_reports'])} records found")
+            try:
+                data["lab_reports"] = db_query(query, (self.user_id, self.years_back))
+                logger.info(f"   ✓ lab_reports: {len(data['lab_reports'])} records found")
+            except Exception as e:
+                logger.warning(f"   ⚠️  lab_reports query failed: {e}")
+                data["lab_reports"] = []
             
             # Fetch menstrual cycle data
             query = """
@@ -336,19 +353,28 @@ class VitalityService:
                 ORDER BY period_start_date DESC
                 LIMIT 100
             """
-            data["menstrual_cycles"] = db_query(query, (self.user_id, self.years_back))
-            logger.info(f"   ✓ menstrual_cycles: {len(data['menstrual_cycles'])} records found")
+            try:
+                data["menstrual_cycles"] = db_query(query, (self.user_id, self.years_back))
+                logger.info(f"   ✓ menstrual_cycles: {len(data['menstrual_cycles'])} records found")
+            except Exception as e:
+                logger.warning(f"   ⚠️  menstrual_cycles query failed: {e}")
+                data["menstrual_cycles"] = []
             
-            # Fetch user profile
+            # Fetch user profile - schema has p.age, not activity_level/life_stage/
+            # age_group/date_of_birth (those columns don't exist and previously
+            # made this query throw, silently dropping profile data for every user).
             query = """
-                SELECT p.activity_level, p.life_stage, p.age_group, u.date_of_birth
+                SELECT p.age
                 FROM profiles p
-                JOIN users u ON p.user_id = u.id
                 WHERE p.user_id = %s
             """
-            profile = db_query(query, (self.user_id,))
-            data["profile"] = profile[0] if profile else {}
-            logger.info(f"   ✓ profile: {bool(data['profile'])}")
+            try:
+                profile = db_query(query, (self.user_id,))
+                data["profile"] = profile[0] if profile else {}
+                logger.info(f"   ✓ profile: {bool(data['profile'])}")
+            except Exception as e:
+                logger.warning(f"   ⚠️  profile query failed: {e}")
+                data["profile"] = {}
             
             # Fetch sleep & activity data from terra_activity_data
             query = """
@@ -1132,7 +1158,25 @@ class LifeArcService:
         """Generate complete life arc timeline with enhanced milestones."""
         print(f"[LIFE_ARC] START get_life_arc_timeline user_id={self.user_id}")
         try:
-            # Check eligibility first
+            # Shared account-age gate first - same 30-day rule as Vitality,
+            # so a new user gets one consistent reason across every tab
+            # instead of being blocked here only on raw data presence.
+            age_eligible, age_message = check_account_age_eligibility(self.user_id)
+            if not age_eligible:
+                print(f"[LIFE_ARC] Account age ineligible: {age_message}")
+                return LifeArcResponse(
+                    milestones=[],
+                    timeline_summary=TimelineSummary(
+                        total_milestones=0,
+                        major_events=0,
+                        avg_monthly_milestones=0,
+                        date_range={"start": date.today(), "end": date.today()}
+                    ),
+                    eligibility_status="ineligible",
+                    message=age_message
+                )
+            
+            # Check data-presence eligibility
             eligibility_status, is_eligible = self._check_eligibility()
             print(f"[LIFE_ARC] Eligibility: {eligibility_status}")
             
@@ -1146,7 +1190,9 @@ class LifeArcService:
                         major_events=0,
                         avg_monthly_milestones=0,
                         date_range={"start": date.today(), "end": date.today()}
-                    )
+                    ),
+                    eligibility_status=eligibility_status,
+                    message="Not enough logged health data yet to build your timeline. Keep tracking!"
                 )
             
             # Detect milestones from all sources
@@ -1161,7 +1207,9 @@ class LifeArcService:
             
             response = LifeArcResponse(
                 milestones=milestones,
-                timeline_summary=summary
+                timeline_summary=summary,
+                eligibility_status="eligible",
+                message=None
             )
             print(f"[LIFE_ARC] SUCCESS returning {len(milestones)} milestones")
             return response
@@ -1177,7 +1225,9 @@ class LifeArcService:
                     major_events=0,
                     avg_monthly_milestones=0,
                     date_range={"start": date.today(), "end": date.today()}
-                )
+                ),
+                eligibility_status="check_failed",
+                message=str(e)
             )
     
     # ========== HELPER METHODS ==========
@@ -2113,6 +2163,22 @@ class RemindersService:
     def get_preventative_reminders(self) -> RemindersResponse:
         """Generate preventative health reminders response."""
         try:
+            # Shared account-age gate - same 30-day rule as Vitality/Life Arc,
+            # so reminders/mobility aren't the only tabs showing full data to
+            # a brand-new user while Vitality blocks them.
+            age_eligible, age_message = check_account_age_eligibility(self.user_id)
+            if not age_eligible:
+                return RemindersResponse(
+                    reminders=[],
+                    mobility_stress_reminders=[],
+                    summary=RemindersSnapshot(
+                        total_reminders=0, overdue=0, due_soon=0,
+                        scheduled=0, up_to_date=0, not_applicable=0
+                    ),
+                    eligibility_status="ineligible",
+                    data_completeness=0.0
+                )
+
             # Get user profile and age
             user_profile = self._get_user_profile()
             
@@ -2128,7 +2194,9 @@ class RemindersService:
             return RemindersResponse(
                 reminders=reminders,
                 mobility_stress_reminders=mobility_metrics,
-                summary=summary
+                summary=summary,
+                eligibility_status="eligible",
+                data_completeness=100.0
             )
         except Exception as e:
             logger.error(f"Error generating reminders: {e}")
@@ -2138,17 +2206,25 @@ class RemindersService:
                 summary=RemindersSnapshot(
                     total_reminders=0, overdue=0, due_soon=0,
                     scheduled=0, up_to_date=0, not_applicable=0
-                )
+                ),
+                eligibility_status="check_failed",
+                data_completeness=0.0
             )
     
     def _get_user_profile(self) -> Dict[str, Any]:
-        """Get user age and profile info."""
+        """Get user age and profile info.
+
+        Schema: profiles has id, user_id, life_stage_id, activity_id, age,
+        height, weight - NOT date_of_birth/activity_level/life_stage/age_group.
+        The old query referenced non-existent columns, which threw on every
+        call and silently fell through to a hardcoded age=40 default for
+        every user regardless of their real age.
+        """
         try:
             query = """
-                SELECT u.id, u.date_of_birth, p.activity_level, p.life_stage, p.age_group
-                FROM users u
-                JOIN profiles p ON u.id = p.user_id
-                WHERE u.id = %s
+                SELECT p.age
+                FROM profiles p
+                WHERE p.user_id = %s
             """
             result = self.db_query(query, (self.user_id,))
             return result[0] if result else {}
@@ -2157,26 +2233,13 @@ class RemindersService:
             return {}
     
     def _get_user_age(self, user_profile: Dict) -> int:
-        """Calculate user age from date of birth or age_group."""
-        try:
-            # Try date_of_birth first
-            dob = user_profile.get("date_of_birth")
-            if dob:
-                today = date.today()
-                age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
-                return age
-        except:
-            pass
-        
-        # Fall back to age_group from profiles table
-        try:
-            age_group = user_profile.get("age_group")
-            if age_group and isinstance(age_group, str):
-                # Parse age_group (e.g., "40-50" → 40)
-                lower_bound = age_group.split('-')[0].strip()
-                return int(lower_bound)
-        except:
-            pass
+        """Get user age from profiles.age, falling back to 40 only if truly unknown."""
+        age = user_profile.get("age")
+        if age is not None:
+            try:
+                return int(age)
+            except (TypeError, ValueError):
+                pass
         
         return 40  # Default age for unknown users
     
@@ -2398,99 +2461,87 @@ class RemindersService:
         
         return metrics
     
-    def _calculate_hip_flexibility_score(self) -> int:
-        """Calculate hip flexibility from health logs mentioning flexibility, stretching, yoga."""
+    def _fetch_recent_logs_text(self) -> list:
+        """Fetch last 30 days of notes + symptoms (as searchable text) per log.
+
+        symptoms is a JSON array of structured tags (e.g. "Back pain",
+        "Hot flashes") - real, usable signal that the old notes-only keyword
+        queries never looked at, since free-text notes are often empty or
+        placeholder junk in practice.
+        """
         try:
             query = """
-                SELECT COUNT(*) as log_count,
-                       SUM(CASE WHEN notes LIKE '%stretch%' OR notes LIKE '%yoga%' OR notes LIKE '%flexible%' THEN 1 ELSE 0 END) as positive_count,
-                       SUM(CASE WHEN notes LIKE '%stiff%' OR notes LIKE '%tight%' OR notes LIKE '%pain%' THEN -1 ELSE 0 END) as negative_count
+                SELECT notes, symptoms
                 FROM health_logs
                 WHERE user_id = %s AND log_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
             """
-            result = self.db_query(query, (self.user_id,))
-            if result and result[0]:
-                log_count = result[0].get("log_count", 0) or 0
-                positive_count = result[0].get("positive_count", 0) or 0
-                negative_count = result[0].get("negative_count", 0) or 0
-                if log_count > 0:
-                    sentiment = ((positive_count - negative_count) / log_count) * 15
-                    return max(0, min(100, int(70 + sentiment)))
-            return 70
+            rows = self.db_query(query, (self.user_id,)) or []
         except Exception as e:
-            logger.error(f"Error calculating hip flexibility: {e}")
-            return 70
+            logger.error(f"Error fetching recent logs for mobility scoring: {e}")
+            return []
+
+        texts = []
+        for row in rows:
+            notes = row.get("notes") or ""
+            symptoms = row.get("symptoms")
+            if isinstance(symptoms, str):
+                try:
+                    symptoms = json.loads(symptoms)
+                except (json.JSONDecodeError, TypeError):
+                    symptoms = []
+            symptoms_text = " ".join(str(s) for s in symptoms) if isinstance(symptoms, list) else ""
+            texts.append(f"{notes} {symptoms_text}".lower())
+        return texts
+
+    def _score_from_keywords(self, texts: list, positive_keywords: list, negative_keywords: list, baseline: int, weight: int) -> int:
+        """Shared keyword-sentiment scorer used by all 4 mobility/stress metrics."""
+        if not texts:
+            return baseline
+
+        positive_count = sum(1 for t in texts if any(kw in t for kw in positive_keywords))
+        negative_count = sum(1 for t in texts if any(kw in t for kw in negative_keywords))
+        sentiment = ((positive_count - negative_count) / len(texts)) * weight
+        return max(0, min(100, int(baseline + sentiment)))
+
+    def _calculate_hip_flexibility_score(self) -> int:
+        """Calculate hip flexibility from notes + logged symptoms (stretching/yoga vs stiffness/back pain)."""
+        texts = self._fetch_recent_logs_text()
+        return self._score_from_keywords(
+            texts,
+            positive_keywords=["stretch", "yoga", "flexible"],
+            negative_keywords=["stiff", "tight", "pain", "back pain", "joint pain"],
+            baseline=70, weight=15
+        )
     
     def _calculate_grip_strength_score(self) -> int:
-        """Calculate grip strength from activity data and strength-related logs."""
-        try:
-            query = """
-                SELECT COUNT(*) as log_count,
-                       SUM(CASE WHEN notes LIKE '%strength%' OR notes LIKE '%weight%' OR notes LIKE '%strong%' THEN 1 ELSE 0 END) as positive_count,
-                       SUM(CASE WHEN notes LIKE '%weak%' OR notes LIKE '%fatigue%' THEN -1 ELSE 0 END) as negative_count
-                FROM health_logs
-                WHERE user_id = %s AND log_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-            """
-            result = self.db_query(query, (self.user_id,))
-            if result and result[0]:
-                log_count = result[0].get("log_count", 0) or 0
-                positive_count = result[0].get("positive_count", 0) or 0
-                negative_count = result[0].get("negative_count", 0) or 0
-                if log_count > 0:
-                    sentiment = ((positive_count - negative_count) / log_count) * 18
-                    return max(0, min(100, int(72 + sentiment)))
-            return 72
-        except Exception as e:
-            logger.error(f"Error calculating grip strength: {e}")
-            return 72
+        """Calculate grip strength from notes + logged symptoms (strength activity vs fatigue)."""
+        texts = self._fetch_recent_logs_text()
+        return self._score_from_keywords(
+            texts,
+            positive_keywords=["strength", "weight", "strong"],
+            negative_keywords=["weak", "fatigue"],
+            baseline=72, weight=18
+        )
     
     def _calculate_balance_score(self) -> int:
-        """Calculate balance score from activity and coordination-related logs."""
-        try:
-            query = """
-                SELECT COUNT(*) as log_count,
-                       SUM(CASE WHEN notes LIKE '%balance%' OR notes LIKE '%coordin%' OR notes LIKE '%stable%' THEN 1 ELSE 0 END) as positive_count,
-                       SUM(CASE WHEN notes LIKE '%dizzy%' OR notes LIKE '%unsteady%' OR notes LIKE '%fall%' THEN -1 ELSE 0 END) as negative_count
-                FROM health_logs
-                WHERE user_id = %s AND log_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-            """
-            result = self.db_query(query, (self.user_id,))
-            if result and result[0]:
-                log_count = result[0].get("log_count", 0) or 0
-                positive_count = result[0].get("positive_count", 0) or 0
-                negative_count = result[0].get("negative_count", 0) or 0
-                if log_count > 0:
-                    sentiment = ((positive_count - negative_count) / log_count) * 20
-                    return max(0, min(100, int(75 + sentiment)))
-            return 75
-        except Exception as e:
-            logger.error(f"Error calculating balance score: {e}")
-            return 75
+        """Calculate balance score from notes + logged symptoms (coordination vs dizziness)."""
+        texts = self._fetch_recent_logs_text()
+        return self._score_from_keywords(
+            texts,
+            positive_keywords=["balance", "coordin", "stable"],
+            negative_keywords=["dizzy", "unsteady", "fall", "brain fog"],
+            baseline=75, weight=20
+        )
     
     def _calculate_posture_score(self) -> int:
-        """Calculate posture alignment from posture and alignment-related logs."""
-        try:
-            query = """
-                SELECT COUNT(*) as log_count,
-                       SUM(CASE WHEN notes LIKE '%posture%' OR notes LIKE '%align%' OR notes LIKE '%straight%' THEN 1 ELSE 0 END) as positive_count,
-                       SUM(CASE WHEN notes LIKE '%slouch%' OR notes LIKE '%hunch%' OR notes LIKE '%back pain%' THEN -1 ELSE 0 END) as negative_count
-                FROM health_logs
-                WHERE user_id = %s AND log_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-            """
-            result = self.db_query(query, (self.user_id,))
-            if result and result[0]:
-                log_count = result[0].get("log_count", 0) or 0
-                positive_count = result[0].get("positive_count", 0) or 0
-                negative_count = result[0].get("negative_count", 0) or 0
-                if log_count > 0:
-                    sentiment = ((positive_count - negative_count) / log_count) * 16
-                    return max(0, min(100, int(73 + sentiment)))
-            return 73
-        except Exception as e:
-            logger.error(f"Error calculating posture score: {e}")
-            return 73
-    
-
+        """Calculate posture alignment from notes + logged symptoms (alignment vs back/joint pain)."""
+        texts = self._fetch_recent_logs_text()
+        return self._score_from_keywords(
+            texts,
+            positive_keywords=["posture", "align", "straight"],
+            negative_keywords=["slouch", "hunch", "back pain"],
+            baseline=73, weight=16
+        )
     
     def _calculate_summary(self, reminders: List[HealthReminder]) -> RemindersSnapshot:
         """Calculate summary statistics."""
