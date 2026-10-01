@@ -140,6 +140,8 @@ class LifeArcResponse(BaseModel):
     """Response for Life Arc Timeline API."""
     milestones: List[Milestone] = Field(..., description="Chronological milestone list")
     timeline_summary: TimelineSummary = Field(..., description="Timeline statistics")
+    eligibility_status: str = Field(default="eligible", description="eligible | ineligible | needs_more_data | check_failed")
+    message: Optional[str] = Field(None, description="Explanation when not eligible")
     
     class Config:
         json_schema_extra = {
@@ -233,6 +235,8 @@ class PreventativeRemindersResponse(BaseModel):
     """Response for Preventative Health Reminders endpoint."""
     reminders: List[HealthReminder] = Field(..., description="Preventative health reminders")
     summary: RemindersSnapshot = Field(..., description="Summary statistics")
+    eligibility_status: str = Field(default="eligible", description="eligible | ineligible | check_failed")
+    message: Optional[str] = Field(None, description="Explanation when not eligible")
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
     class Config:
@@ -283,6 +287,8 @@ class MobilityStressIndicatorsResponse(BaseModel):
     indicators: List[MobilityStressMetric] = Field(..., description="Mobility and stress metrics")
     overall_mobility_score: float = Field(..., ge=0, le=100, description="Average mobility score")
     overall_stress_status: str = Field(..., description="Overall stress status: good, moderate, needs_attention")
+    eligibility_status: str = Field(default="eligible", description="eligible | ineligible | check_failed")
+    message: Optional[str] = Field(None, description="Explanation when not eligible")
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
     class Config:
