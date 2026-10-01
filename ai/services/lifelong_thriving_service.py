@@ -339,11 +339,12 @@ class VitalityService:
             data["menstrual_cycles"] = db_query(query, (self.user_id, self.years_back))
             logger.info(f"   ✓ menstrual_cycles: {len(data['menstrual_cycles'])} records found")
             
-            # Fetch user profile
+            # Fetch user profile - schema has p.age, not activity_level/life_stage/
+            # age_group/date_of_birth (those columns don't exist and previously
+            # made this query throw, silently dropping profile data for every user).
             query = """
-                SELECT p.activity_level, p.life_stage, p.age_group, u.date_of_birth
+                SELECT p.age
                 FROM profiles p
-                JOIN users u ON p.user_id = u.id
                 WHERE p.user_id = %s
             """
             profile = db_query(query, (self.user_id,))
@@ -2142,13 +2143,19 @@ class RemindersService:
             )
     
     def _get_user_profile(self) -> Dict[str, Any]:
-        """Get user age and profile info."""
+        """Get user age and profile info.
+
+        Schema: profiles has id, user_id, life_stage_id, activity_id, age,
+        height, weight - NOT date_of_birth/activity_level/life_stage/age_group.
+        The old query referenced non-existent columns, which threw on every
+        call and silently fell through to a hardcoded age=40 default for
+        every user regardless of their real age.
+        """
         try:
             query = """
-                SELECT u.id, u.date_of_birth, p.activity_level, p.life_stage, p.age_group
-                FROM users u
-                JOIN profiles p ON u.id = p.user_id
-                WHERE u.id = %s
+                SELECT p.age
+                FROM profiles p
+                WHERE p.user_id = %s
             """
             result = self.db_query(query, (self.user_id,))
             return result[0] if result else {}
@@ -2157,26 +2164,13 @@ class RemindersService:
             return {}
     
     def _get_user_age(self, user_profile: Dict) -> int:
-        """Calculate user age from date of birth or age_group."""
-        try:
-            # Try date_of_birth first
-            dob = user_profile.get("date_of_birth")
-            if dob:
-                today = date.today()
-                age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
-                return age
-        except:
-            pass
-        
-        # Fall back to age_group from profiles table
-        try:
-            age_group = user_profile.get("age_group")
-            if age_group and isinstance(age_group, str):
-                # Parse age_group (e.g., "40-50" → 40)
-                lower_bound = age_group.split('-')[0].strip()
-                return int(lower_bound)
-        except:
-            pass
+        """Get user age from profiles.age, falling back to 40 only if truly unknown."""
+        age = user_profile.get("age")
+        if age is not None:
+            try:
+                return int(age)
+            except (TypeError, ValueError):
+                pass
         
         return 40  # Default age for unknown users
     
