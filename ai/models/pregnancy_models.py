@@ -68,13 +68,14 @@ class PregnancyMilestones(BaseModel):
 
 class RecoveryMetrics(BaseModel):
     """Physical recovery metrics for postpartum."""
-    physical_recovery_percent: int = Field(..., ge=0, le=100, description="Overall physical recovery percentage (0-100%)")
-    bleeding_level: str = Field(..., description="heavy, moderate, light, minimal")
-    incision_healing: Optional[str] = Field(None, description="good, fair, needs_attention (if C-section)")
-    pelvic_floor_status: str = Field(..., description="healing, recovered, needs_attention")
-    hormonal_balance_percent: int = Field(..., ge=0, le=100, description="Hormonal balance recovery percentage (0-100%)")
-    energy_level_percent: int = Field(..., ge=0, le=100, description="Energy level percentage (0-100%)")
-    sleep_quality_percent: int = Field(..., ge=0, le=100, description="Sleep quality percentage (0-100%)")
+    physical_recovery_percent: Optional[int] = Field(None, ge=0, le=100, description="Overall physical recovery percentage (0-100%); null if no clinical screening recorded yet")
+    hormonal_balance_percent: Optional[int] = Field(None, ge=0, le=100, description="Hormonal balance recovery percentage (0-100%); null if no clinical screening recorded yet")
+    energy_level_percent: Optional[int] = Field(None, ge=0, le=100, description="Energy level percentage (0-100%); null if no wearable or logged data available")
+    sleep_quality_percent: Optional[int] = Field(None, ge=0, le=100, description="Sleep quality percentage (0-100%); null if no wearable data available")
+    energy_data_source: str = Field(default="no_data", description="wearable, health_log, or no_data")
+    sleep_data_source: str = Field(default="no_data", description="wearable or no_data")
+    recovery_data_source: str = Field(default="no_data", description="screening or no_data")
+    hormonal_data_source: str = Field(default="no_data", description="screening or no_data")
 
 
 class MentalHealth(BaseModel):
