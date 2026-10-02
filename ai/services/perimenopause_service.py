@@ -247,7 +247,10 @@ def get_perimenopause_insights_tab(user_id: int, period: str = "7d") -> Dict[str
             }
 
         health_logs, start_date, end_date = _fetch_period_health_logs(user_id, period)
-        symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date)
+        
+        # Fetch Terra wearable data for sleep/HRV
+        terra_data = _fetch_terra_sleep_data(user_id, start_date, end_date)
+        symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date, terra_data=terra_data)
 
         return {
             "symptom_matrix": symptom_matrix,
@@ -440,6 +443,9 @@ def get_perimenopause_insights(
             # Get menopause summary
             summary = get_menopause_summary(user_id)
             
+            # Fetch Terra wearable data for sleep/HRV
+            terra_data = _fetch_terra_sleep_data(user_id, start_date, end_date)
+            
             result = {"summary": summary}
             
             # Build vasomotor tracker if requested
@@ -447,9 +453,9 @@ def get_perimenopause_insights(
                 vasomotor = _build_vasomotor_tracker(health_logs, period, start_date, end_date)
                 result["vasomotor_tracker"] = vasomotor
             
-            # Build symptom matrix if requested
+            # Build symptom matrix if requested (with Terra data)
             if "symptoms" in include:
-                symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date)
+                symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date, terra_data=terra_data)
                 result["symptom_matrix"] = symptom_matrix
             
             return result
@@ -552,11 +558,14 @@ def get_clinical_export(
             latest_lab = cursor.fetchone()
             fsh_value, fsh_status = _extract_fsh_from_biomarkers(latest_lab.get("biomarkers") if latest_lab else None)
             
+            # Fetch Terra wearable data for sleep
+            terra_data = _fetch_terra_sleep_data(user_id, start, end)
+            
             # Get vasomotor data
             vasomotor = _build_vasomotor_tracker(health_logs, "custom", start, end)
             
-            # Get symptom data
-            symptom_matrix = _build_symptom_matrix(health_logs, "custom", start, end)
+            # Get symptom data (with Terra)
+            symptom_matrix = _build_symptom_matrix(health_logs, "custom", start, end, terra_data=terra_data)
             
             # Compile metrics
             primary_symptoms = _extract_top_symptoms(health_logs)
@@ -574,18 +583,26 @@ def get_clinical_export(
                     most_common = max(severity_counts, key=severity_counts.get)
                     symptom_severity_breakdown[symptom] = most_common
             
-            # Calculate sleep quality
-            sleep_hours = []
+            # Calculate sleep - prefer Terra wearable data
+            avg_sleep_hours = None
+            if terra_data and terra_data.get("has_data") and terra_data.get("avg_sleep_hours") is not None:
+                avg_sleep_hours = terra_data["avg_sleep_hours"]
+            
+            # Fallback to health_logs
+            if avg_sleep_hours is None:
+                sleep_hours = []
+                for log in health_logs:
+                    symptoms = _normalize_symptoms(log.get("symptoms"))
+                    if symptoms.get("sleep_hours"):
+                        sleep_hours.append(symptoms.get("sleep_hours"))
+                avg_sleep_hours = sum(sleep_hours) / len(sleep_hours) if sleep_hours else 7
+            
             sleep_quality_scores = []
             for log in health_logs:
                 symptoms = _normalize_symptoms(log.get("symptoms"))
-                if symptoms.get("sleep_hours"):
-                    sleep_hours.append(symptoms.get("sleep_hours"))
                 if symptoms.get("sleep_quality"):
                     sq_map = {"poor": 1, "fair": 2, "good": 3, "excellent": 4}
                     sleep_quality_scores.append(sq_map.get(symptoms.get("sleep_quality"), 2))
-            
-            avg_sleep_hours = sum(sleep_hours) / len(sleep_hours) if sleep_hours else 7
             sleep_quality_avg = sum(sleep_quality_scores) / len(sleep_quality_scores) if sleep_quality_scores else 2
             sleep_quality_labels = {1: "poor", 2: "fair", 3: "good", 4: "excellent"}
             sleep_quality = sleep_quality_labels.get(round(sleep_quality_avg), "fair")
@@ -695,6 +712,104 @@ Format as bullet points.
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
+
+
+def _fetch_terra_sleep_data(user_id: int, start_date: date, end_date: date) -> Dict[str, Any]:
+    """Fetch sleep/HRV data from terra_activity_data for perimenopause insights.
+    
+    Returns dict with avg_sleep_hours, avg_hrv, sleep_score, has_data flag.
+    Structure-safe: returns None values (not defaults) when no data exists.
+    """
+    try:
+        from ai.utils.db import get_connection
+        
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT payload, created_at
+                FROM terra_activity_data
+                WHERE user_id = %s 
+                  AND created_at >= %s
+                  AND created_at <= %s
+                ORDER BY created_at DESC
+                LIMIT 30
+                """,
+                (user_id, start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()),
+            )
+            rows = cursor.fetchall()
+            
+            if not rows:
+                return {
+                    "avg_sleep_hours": None,
+                    "avg_hrv": None,
+                    "sleep_score": None,
+                    "recovery_score": None,
+                    "has_data": False,
+                }
+            
+            sleep_scores = []
+            hrv_values = []
+            recovery_scores = []
+            
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                
+                # Extract sleep score from scores dict
+                try:
+                    scores = payload.get("scores", {})
+                    if scores.get("sleep") is not None:
+                        sleep_scores.append(float(scores["sleep"]))
+                    if scores.get("recovery") is not None:
+                        recovery_scores.append(float(scores["recovery"]))
+                    
+                    # Also check nested data structure
+                    data_list = payload.get("data", [])
+                    if data_list and isinstance(data_list, list):
+                        for data_item in data_list:
+                            nested_scores = data_item.get("scores", {})
+                            if nested_scores.get("sleep") is not None:
+                                sleep_scores.append(float(nested_scores["sleep"]))
+                except (ValueError, TypeError, AttributeError):
+                    pass
+                
+                # Extract HRV
+                try:
+                    data_list = payload.get("data", [])
+                    if data_list and isinstance(data_list, list):
+                        for data_item in data_list:
+                            hrv = data_item.get("heart_data", {}).get("heart_rate_data", {}).get("summary", {}).get("avg_hrv_rmssd")
+                            if hrv is not None:
+                                hrv_values.append(float(hrv))
+                except (ValueError, TypeError, AttributeError, IndexError):
+                    pass
+            
+            # Calculate averages - return None if no valid data
+            avg_sleep_score = sum(sleep_scores) / len(sleep_scores) if sleep_scores else None
+            avg_hrv = sum(hrv_values) / len(hrv_values) if hrv_values else None
+            avg_recovery = sum(recovery_scores) / len(recovery_scores) if recovery_scores else None
+            
+            # Convert sleep score to hours estimate (score is typically 0-100 scale)
+            # This is approximate - actual sleep duration would need sleep_durations_data
+            avg_sleep_hours = None
+            if avg_sleep_score is not None:
+                # Map score to hours: score 80+ = 7-8hrs, 60-80 = 6-7hrs, <60 = 5-6hrs
+                avg_sleep_hours = round(5 + (avg_sleep_score / 100) * 3, 1)
+            
+            return {
+                "avg_sleep_hours": avg_sleep_hours,
+                "avg_hrv": round(avg_hrv, 1) if avg_hrv else None,
+                "sleep_score": round(avg_sleep_score, 1) if avg_sleep_score else None,
+                "recovery_score": round(avg_recovery, 1) if avg_recovery else None,
+                "has_data": bool(sleep_scores or hrv_values),
+            }
+    except Exception as e:
+        print(f"[ERROR] _fetch_terra_sleep_data for user {user_id}: {e}")
+        return {"avg_sleep_hours": None, "avg_hrv": None, "has_data": False}
+
 
 # Perimenopause onset before this age is clinically atypical (suggestive of
 # POI/thyroid/PCOS rather than a default assumption) per ACOG/STRAW+10
@@ -1081,9 +1196,10 @@ def _build_symptom_matrix(
     health_logs: list,
     period: str,
     start_date: date,
-    end_date: date
+    end_date: date,
+    terra_data: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """Build symptom matrix from health logs."""
+    """Build symptom matrix from health logs + Terra wearable data."""
     symptom_frequency = defaultdict(int)
     symptom_severity = defaultdict(lambda: defaultdict(int))
     entries = []
@@ -1150,14 +1266,25 @@ def _build_symptom_matrix(
     energy_scores = [energy_map.get(log.get("energy_level"), 50) for log in health_logs if log.get("energy_level")]
     avg_energy = int(sum(energy_scores) / len(energy_scores)) if energy_scores else 50
     
-    # Calculate sleep
-    sleep_hours = []
-    for log in health_logs:
-        symptoms = _normalize_symptoms(log.get("symptoms"))
-        
-        if symptoms.get("sleep_hours"):
-            sleep_hours.append(symptoms.get("sleep_hours"))
-    avg_sleep = sum(sleep_hours) / len(sleep_hours) if sleep_hours else 7
+    # Calculate sleep - prefer Terra wearable data, fallback to health_logs
+    avg_sleep = None
+    
+    # First try Terra data (wearable)
+    if terra_data and terra_data.get("has_data") and terra_data.get("avg_sleep_hours") is not None:
+        avg_sleep = terra_data["avg_sleep_hours"]
+    
+    # Fallback to health_logs if no Terra data
+    if avg_sleep is None:
+        sleep_hours = []
+        for log in health_logs:
+            symptoms = _normalize_symptoms(log.get("symptoms"))
+            if symptoms.get("sleep_hours"):
+                sleep_hours.append(symptoms.get("sleep_hours"))
+        avg_sleep = sum(sleep_hours) / len(sleep_hours) if sleep_hours else None
+    
+    # Only use default if no data from any source
+    if avg_sleep is None:
+        avg_sleep = 7  # default fallback
     
     return {
         "period": period,
@@ -1233,6 +1360,68 @@ def _calculate_gsm_health(health_logs: list) -> Dict[str, Dict]:
     return gsm_health
 
 
+def _generate_correlation_descriptions_llm(correlations: List[Dict]) -> List[Dict]:
+    """
+    Use LLM to generate personalized, insightful descriptions for symptom correlations.
+    Falls back to static descriptions if LLM fails.
+    """
+    if not correlations:
+        return correlations
+    
+    try:
+        from ai.utils.llm_call import llm_call
+        
+        # Build correlation summary for LLM
+        correlation_summary = "\n".join([
+            f"- {c['from']} ↔ {c['to']}: {c['percentage']}% co-occurrence"
+            for c in correlations
+        ])
+        
+        prompt = f"""You are a perimenopause health insights assistant. Generate short, helpful descriptions for these symptom correlations.
+
+Correlations found in user's health logs:
+{correlation_summary}
+
+For each correlation, write a brief 1-line description (max 15 words) explaining:
+- What this pattern might mean for the user
+- Use empathetic, supportive tone
+- Focus on perimenopause context
+
+Return ONLY a valid JSON array with this exact structure (no markdown, no extra text):
+[
+  {{"from": "Symptom1", "to": "Symptom2", "description": "Your brief insight here."}}
+]
+
+Important: Return descriptions for ALL {len(correlations)} correlations in the same order."""
+
+        response = llm_call(prompt, max_tokens=500, temperature=0.7)
+        
+        # Parse LLM response
+        # Handle potential markdown code blocks
+        response = response.strip()
+        if response.startswith("```"):
+            response = response.split("```")[1]
+            if response.startswith("json"):
+                response = response[4:]
+        response = response.strip()
+        
+        llm_descriptions = json.loads(response)
+        
+        # Update correlations with LLM descriptions
+        if isinstance(llm_descriptions, list) and len(llm_descriptions) == len(correlations):
+            for i, desc_item in enumerate(llm_descriptions):
+                if isinstance(desc_item, dict) and "description" in desc_item:
+                    correlations[i]["description"] = desc_item["description"]
+        
+        return correlations
+        
+    except Exception as e:
+        # Fallback: keep existing static descriptions
+        import logging
+        logging.warning(f"LLM correlation description failed, using static: {e}")
+        return correlations
+
+
 def _calculate_symptom_correlations(health_logs: list) -> List[Dict]:
     """Calculate symptom correlations with percentages and descriptions."""
     from collections import defaultdict
@@ -1273,6 +1462,7 @@ def _calculate_symptom_correlations(health_logs: list) -> List[Dict]:
     # included) - the previous singular keys here never matched real data.
     correlations = []
     
+    # Static fallback descriptions (used if LLM fails)
     correlation_descriptions = {
         ("hot_flashes", "sleep_disruption"): "Hot flash episodes directly correlate with {pct}% reduction in deep sleep duration.",
         ("sleep_disruption", "mood"): "Sleep disruption raises irritability and mood changes in {pct}% of logged entries.",
@@ -1287,7 +1477,7 @@ def _calculate_symptom_correlations(health_logs: list) -> List[Dict]:
             if count > 0:
                 percentage = int((count / total_days) * 100) if total_days > 0 else 0
                 
-                # Find description
+                # Find static description as fallback
                 desc = None
                 for (s1, s2), desc_template in correlation_descriptions.items():
                     if (symptom1 == s1 and symptom2 == s2) or (symptom1 == s2 and symptom2 == s1):
@@ -1306,5 +1496,8 @@ def _calculate_symptom_correlations(health_logs: list) -> List[Dict]:
     
     # Sort by percentage descending and return top correlations
     correlations = sorted(correlations, key=lambda x: x["percentage"], reverse=True)[:5]
+    
+    # Generate LLM-based descriptions (replaces static if successful)
+    correlations = _generate_correlation_descriptions_llm(correlations)
     
     return correlations
