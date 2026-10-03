@@ -20,7 +20,8 @@ class ClaudeLLM:
             "max_tokens": max_tokens,
             "messages": messages,
         }
-        if temperature is not None:
+        # claude-opus-4-7 rejects `temperature` (400 invalid_request_error), so never forward it
+        if temperature is not None and not self.model.startswith("claude-opus-4"):
             kwargs["temperature"] = temperature
         if system:
             kwargs["system"] = system

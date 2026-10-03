@@ -150,6 +150,27 @@ def get_active_journey_by_ids(user_id: int, journey_ids: list[int]) -> dict[str,
         return cursor.fetchone()
 
 
+def get_all_active_journeys(user_id: int) -> list[dict[str, Any]]:
+    """Return every active journey (id + title) linked to this user's profile.
+
+    Unlike get_active_journey (which resolves a single named journey), this
+    returns the full list so callers can surface all of a user's journeys at once.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT lj.id AS journey_id, lj.title AS journey_title
+            FROM profiles p
+            JOIN life_journey_profile ljp ON ljp.profile_id = p.id
+            JOIN life_journeys lj ON lj.id = ljp.life_journey_id
+            WHERE p.user_id = %s
+            """,
+            (user_id,),
+        )
+        return cursor.fetchall()
+
+
 def get_current_cycle(user_id: int) -> dict[str, Any] | None:
     """Fetch current (incomplete) menstrual cycle for user."""
     with get_connection() as conn:
