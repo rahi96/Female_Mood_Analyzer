@@ -185,7 +185,7 @@ class ClinicalExport(BaseModel):
     # Vasomotor Summary
     vasomotor_events_total: int
     vasomotor_avg_frequency_per_day: float
-    vasomotor_avg_severity: float = Field(..., ge=1, le=10)
+    vasomotor_avg_severity: float = Field(..., ge=0, le=10)  # 0 = no events recorded
     vasomotor_trend: str = Field(..., description="improving, stable, or worsening")
     vasomotor_primary_triggers: List[str] = Field(..., description="Top 3 identified triggers")
     
