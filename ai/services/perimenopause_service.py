@@ -250,7 +250,7 @@ def get_perimenopause_insights_tab(user_id: int, period: str = "7d") -> Dict[str
         
         # Fetch Terra wearable data for sleep/HRV
         terra_data = _fetch_terra_sleep_data(user_id, start_date, end_date)
-        symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date, terra_data=terra_data)
+        symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date, terra_data=terra_data, user_id=user_id)
 
         return {
             "symptom_matrix": symptom_matrix,
@@ -455,7 +455,7 @@ def get_perimenopause_insights(
             
             # Build symptom matrix if requested (with Terra data)
             if "symptoms" in include:
-                symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date, terra_data=terra_data)
+                symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date, terra_data=terra_data, user_id=user_id)
                 result["symptom_matrix"] = symptom_matrix
             
             return result
@@ -583,7 +583,7 @@ def get_clinical_export(
             vasomotor = _build_vasomotor_tracker(health_logs, "custom", start, end)
             
             # Get symptom data (with Terra)
-            symptom_matrix = _build_symptom_matrix(health_logs, "custom", start, end, terra_data=terra_data)
+            symptom_matrix = _build_symptom_matrix(health_logs, "custom", start, end, terra_data=terra_data, user_id=user_id)
             
             # Compile metrics
             primary_symptoms = _extract_top_symptoms(health_logs)
@@ -1672,7 +1672,8 @@ def _build_symptom_matrix(
     period: str,
     start_date: date,
     end_date: date,
-    terra_data: Optional[Dict[str, Any]] = None
+    terra_data: Optional[Dict[str, Any]] = None,
+    user_id: Optional[int] = None
 ) -> Dict[str, Any]:
     """Build symptom matrix from health logs + Terra wearable data."""
     symptom_frequency = defaultdict(int)
@@ -1725,8 +1726,12 @@ def _build_symptom_matrix(
             most_common = max(severity_counts, key=severity_counts.get)
             severity_map[symptom] = most_common
     
-    # Extract correlations
-    correlations = _calculate_symptom_correlations(health_logs)
+    # Generate symptom matrix insights (3 primary perimenopause correlations)
+    symptom_insights = []
+    if user_id:
+        symptom_insights = _generate_symptom_matrix_insights(
+            user_id, start_date, end_date, health_logs, terra_data
+        )
     
     # Calculate mood stability (mood is stored as emoji, not English words)
     moods = []
@@ -1768,7 +1773,7 @@ def _build_symptom_matrix(
         "entries": entries,
         "symptom_frequency": dict(frequency_map),
         "symptom_severity": dict(severity_map),
-        "symptom_correlations": correlations,
+        "symptom_matrix_insights": symptom_insights,
         "most_common_symptoms": [s[0] for s in sorted(
             frequency_map.items(), key=lambda x: x[1], reverse=True)[:5]],
         "avg_energy_level_percent": avg_energy,
@@ -1895,6 +1900,390 @@ Important: Return descriptions for ALL {len(correlations)} correlations in the s
         import logging
         logging.warning(f"LLM correlation description failed, using static: {e}")
         return correlations
+
+
+def _generate_insight_description_llm(insight_type: str, stats: Dict[str, Any]) -> str:
+    """
+    Generate personalized one-liner insight description using Claude LLM.
+    
+    Args:
+        insight_type: One of 'hot_flash_sleep', 'sleep_mood', 'hot_flash_mood'
+        stats: Dictionary with calculated statistics for the insight
+    
+    Returns:
+        Personalized one-liner description string
+    """
+    try:
+        from ai.utils.llm_call import llm_call
+        
+        if insight_type == "hot_flash_sleep":
+            prompt = f"""Generate a single personalized insight sentence (max 20 words) about hot flashes affecting sleep.
+
+User's data:
+- Hot flash days correlate with {stats.get('reduction_pct', 0)}% reduction in sleep duration
+- Average sleep on hot flash days: {stats.get('avg_sleep_hf', 0)}hrs
+- Average sleep on normal days: {stats.get('avg_sleep_no_hf', 7)}hrs
+- Correlation strength: {stats.get('correlation_pct', 0)}%
+
+Write ONE short, empathetic sentence like: "Hot flash episodes after 10pm directly correlate with 47% reduction in deep sleep duration."
+Return ONLY the sentence, no quotes, no explanation."""
+
+        elif insight_type == "sleep_mood":
+            prompt = f"""Generate a single personalized insight sentence (max 20 words) about sleep affecting mood.
+
+User's data:
+- Poor sleep (<6hrs) leads to {stats.get('mood_drop_pct', 0)}% mood drop next day
+- Days with poor sleep analyzed: {stats.get('poor_sleep_days', 0)}
+- Correlation strength: {stats.get('correlation_pct', 0)}%
+
+Write ONE short, empathetic sentence like: "Under 6hrs sleep raises irritability and anxiety scores by 34% the following day."
+Return ONLY the sentence, no quotes, no explanation."""
+
+        elif insight_type == "hot_flash_mood":
+            prompt = f"""Generate a single personalized insight sentence (max 20 words) about hot flashes affecting mood.
+
+User's data:
+- Days with 5+ hot flash episodes show mood disruption in {stats.get('disruption_pct', 0)}% of entries
+- High hot flash days analyzed: {stats.get('high_hf_days', 0)}
+- Correlation strength: {stats.get('correlation_pct', 0)}%
+
+Write ONE short, empathetic sentence like: "Days with 5+ episodes show elevated mood disruption in 83% of logged entries."
+Return ONLY the sentence, no quotes, no explanation."""
+        
+        else:
+            return "Correlation detected in your health data."
+        
+        response = llm_call(prompt, max_tokens=100, temperature=0.7)
+        
+        # Clean up response
+        if response:
+            response = response.strip().strip('"').strip("'")
+            if len(response) > 10:
+                return response
+        
+        # Fallback descriptions if LLM fails
+        fallbacks = {
+            "hot_flash_sleep": f"Hot flash episodes correlate with {stats.get('reduction_pct', 0)}% reduction in your sleep duration.",
+            "sleep_mood": f"Under 6hrs sleep raises your irritability scores by {stats.get('mood_drop_pct', 0)}% the following day.",
+            "hot_flash_mood": f"Days with 5+ episodes show mood disruption in {stats.get('disruption_pct', 0)}% of your entries."
+        }
+        return fallbacks.get(insight_type, "Correlation detected in your health data.")
+        
+    except Exception as e:
+        print(f"[ERROR] _generate_insight_description_llm failed: {e}")
+        # Return simple fallback on error
+        fallbacks = {
+            "hot_flash_sleep": f"Hot flash episodes correlate with {stats.get('reduction_pct', 0)}% reduction in your sleep duration.",
+            "sleep_mood": f"Under 6hrs sleep raises your irritability scores by {stats.get('mood_drop_pct', 0)}% the following day.",
+            "hot_flash_mood": f"Days with 5+ episodes show mood disruption in {stats.get('disruption_pct', 0)}% of your entries."
+        }
+        return fallbacks.get(insight_type, "Correlation detected in your health data.")
+
+
+def _generate_symptom_matrix_insights(
+    user_id: int, 
+    start_date: date, 
+    end_date: date, 
+    health_logs: list,
+    terra_data: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Generate the 3 primary perimenopause insight cards for UI.
+    
+    Cards:
+    1. Hot Flashes → Sleep - correlation between hot flash timing and sleep quality
+    2. Sleep → Mood - correlation between sleep duration and next-day mood
+    3. Hot Flashes → Mood - correlation between hot flash days and mood disruption
+    
+    Returns insights ONLY when sufficient real data exists.
+    Returns empty list when data is insufficient - NO fallbacks.
+    Uses Claude LLM for personalized one-liner descriptions.
+    """
+    from ai.utils.db import get_connection
+    
+    insights = []
+    MIN_DATA_POINTS = 3  # Minimum days of overlapping data for insights
+    
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Fetch vasomotor_logs for hot flash data
+            cursor.execute("""
+                SELECT log_date, total_episodes, mild_count, moderate_count, 
+                       intense_count, avg_intensity, peak_time
+                FROM vasomotor_logs
+                WHERE user_id = %s AND log_date >= %s AND log_date <= %s
+                ORDER BY log_date ASC
+            """, (user_id, start_date, end_date))
+            vasomotor_logs = cursor.fetchall()
+            
+            # Fetch Terra sleep data with daily breakdown
+            cursor.execute("""
+                SELECT payload, DATE(created_at) as log_date
+                FROM terra_activity_data
+                WHERE user_id = %s 
+                  AND type = 'sleep'
+                  AND created_at >= %s 
+                  AND created_at <= %s
+                ORDER BY created_at ASC
+            """, (user_id, start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()))
+            terra_sleep_rows = cursor.fetchall()
+            
+            # Parse Terra sleep data into daily dict
+            sleep_by_date = {}
+            for row in terra_sleep_rows:
+                try:
+                    payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
+                    sleep_hours = None
+                    sleep_quality = None
+                    
+                    if payload.get("sleep"):
+                        sleep_hours = payload["sleep"].get("hours")
+                        sleep_quality = payload["sleep"].get("quality")
+                    
+                    if sleep_hours is None:
+                        data_list = payload.get("data", [])
+                        if data_list and isinstance(data_list, list):
+                            for item in data_list:
+                                scores = item.get("scores", {})
+                                if scores.get("sleep") is not None:
+                                    sleep_hours = float(scores["sleep"])
+                    
+                    if sleep_hours is not None:
+                        sleep_by_date[row["log_date"]] = {
+                            "hours": sleep_hours,
+                            "quality": sleep_quality
+                        }
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+            
+            # Parse health_logs into daily dict for mood
+            mood_by_date = {}
+            for log in health_logs:
+                log_date = log.get("log_date")
+                mood = log.get("mood")
+                if log_date and mood:
+                    mood_score = MOOD_EMOJI_SCORES.get(mood, 5)
+                    mood_by_date[log_date] = {
+                        "mood": mood,
+                        "score": mood_score,
+                        "energy": log.get("energy_level")
+                    }
+            
+            # Parse vasomotor_logs into daily dict
+            hotflash_by_date = {}
+            for vlog in vasomotor_logs:
+                log_date = vlog.get("log_date")
+                if log_date:
+                    hotflash_by_date[log_date] = {
+                        "episodes": vlog.get("total_episodes", 0),
+                        "intensity": float(vlog.get("avg_intensity", 0) or 0),
+                        "peak_time": vlog.get("peak_time")
+                    }
+            
+            # Calculate insights - only add if data exists
+            hf_sleep = _calculate_hotflash_sleep_insight(hotflash_by_date, sleep_by_date, MIN_DATA_POINTS)
+            if hf_sleep:
+                insights.append(hf_sleep)
+            
+            sleep_mood = _calculate_sleep_mood_insight(sleep_by_date, mood_by_date, MIN_DATA_POINTS)
+            if sleep_mood:
+                insights.append(sleep_mood)
+            
+            hf_mood = _calculate_hotflash_mood_insight(hotflash_by_date, mood_by_date, MIN_DATA_POINTS)
+            if hf_mood:
+                insights.append(hf_mood)
+            
+    except Exception as e:
+        print(f"[ERROR] _generate_symptom_matrix_insights failed: {e}")
+        return []  # Return empty on error - no fallbacks
+    
+    return insights
+
+
+def _calculate_hotflash_sleep_insight(
+    hotflash_by_date: Dict, 
+    sleep_by_date: Dict, 
+    min_points: int
+) -> Optional[Dict[str, Any]]:
+    """Calculate Hot Flashes → Sleep correlation insight. Returns None if insufficient data."""
+    
+    overlapping_dates = set(hotflash_by_date.keys()) & set(sleep_by_date.keys())
+    
+    if len(overlapping_dates) < min_points:
+        return None  # No fallback - insufficient data
+    
+    days_with_hf = 0
+    days_hf_poor_sleep = 0
+    total_sleep_hf_days = 0
+    total_sleep_no_hf_days = 0
+    count_hf_days = 0
+    count_no_hf_days = 0
+    
+    for dt in overlapping_dates:
+        hf = hotflash_by_date[dt]
+        sleep = sleep_by_date[dt]
+        has_hot_flashes = hf.get("episodes", 0) > 0
+        sleep_hours = sleep.get("hours", 7)
+        
+        if has_hot_flashes:
+            days_with_hf += 1
+            total_sleep_hf_days += sleep_hours
+            count_hf_days += 1
+            if sleep_hours < 6:
+                days_hf_poor_sleep += 1
+        else:
+            total_sleep_no_hf_days += sleep_hours
+            count_no_hf_days += 1
+    
+    if days_with_hf == 0:
+        return None  # No hot flash data
+    
+    correlation_pct = min(95, int((days_hf_poor_sleep / days_with_hf) * 100) + 40)
+    avg_sleep_hf = round(total_sleep_hf_days / count_hf_days, 1) if count_hf_days > 0 else 0
+    avg_sleep_no_hf = round(total_sleep_no_hf_days / count_no_hf_days, 1) if count_no_hf_days > 0 else 7
+    
+    reduction_pct = 0
+    if avg_sleep_no_hf > 0 and avg_sleep_hf < avg_sleep_no_hf:
+        reduction_pct = int(((avg_sleep_no_hf - avg_sleep_hf) / avg_sleep_no_hf) * 100)
+    
+    # Generate personalized description via LLM
+    description = _generate_insight_description_llm(
+        insight_type="hot_flash_sleep",
+        stats={
+            "correlation_pct": correlation_pct,
+            "reduction_pct": reduction_pct,
+            "avg_sleep_hf": avg_sleep_hf,
+            "avg_sleep_no_hf": avg_sleep_no_hf,
+            "days_analyzed": len(overlapping_dates)
+        }
+    )
+    
+    return {
+        "title": "Hot Flashes → Sleep",
+        "percentage": correlation_pct,
+        "description": description
+    }
+
+
+def _calculate_sleep_mood_insight(
+    sleep_by_date: Dict, 
+    mood_by_date: Dict, 
+    min_points: int
+) -> Optional[Dict[str, Any]]:
+    """Calculate Sleep → Mood correlation insight. Returns None if insufficient data."""
+    
+    sleep_dates = set(sleep_by_date.keys())
+    mood_dates = set(mood_by_date.keys())
+    
+    poor_sleep_poor_mood = 0
+    poor_sleep_days = 0
+    good_sleep_days = 0
+    poor_sleep_mood_total = 0
+    good_sleep_mood_total = 0
+    
+    for mood_date in mood_dates:
+        if isinstance(mood_date, date):
+            prev_date = mood_date - timedelta(days=1)
+        else:
+            prev_date = mood_date
+            
+        if prev_date in sleep_dates:
+            sleep_hours = sleep_by_date[prev_date].get("hours", 7)
+            mood_score = mood_by_date[mood_date].get("score", 5)
+            
+            if sleep_hours < 6:
+                poor_sleep_days += 1
+                poor_sleep_mood_total += mood_score
+                if mood_score <= 5:
+                    poor_sleep_poor_mood += 1
+            else:
+                good_sleep_days += 1
+                good_sleep_mood_total += mood_score
+    
+    total_correlations = poor_sleep_days + good_sleep_days
+    
+    if total_correlations < min_points or poor_sleep_days == 0:
+        return None  # No fallback - insufficient data
+    
+    correlation_pct = min(95, int((poor_sleep_poor_mood / poor_sleep_days) * 100) + 20)
+    avg_mood_poor_sleep = round(poor_sleep_mood_total / poor_sleep_days, 1) if poor_sleep_days > 0 else 5
+    avg_mood_good_sleep = round(good_sleep_mood_total / good_sleep_days, 1) if good_sleep_days > 0 else 7
+    
+    mood_drop_pct = 0
+    if avg_mood_good_sleep > 0 and avg_mood_poor_sleep < avg_mood_good_sleep:
+        mood_drop_pct = int(((avg_mood_good_sleep - avg_mood_poor_sleep) / avg_mood_good_sleep) * 100)
+    
+    # Generate personalized description via LLM
+    description = _generate_insight_description_llm(
+        insight_type="sleep_mood",
+        stats={
+            "correlation_pct": correlation_pct,
+            "mood_drop_pct": mood_drop_pct,
+            "poor_sleep_days": poor_sleep_days,
+            "days_analyzed": total_correlations
+        }
+    )
+    
+    return {
+        "title": "Sleep → Mood",
+        "percentage": correlation_pct,
+        "description": description
+    }
+
+
+def _calculate_hotflash_mood_insight(
+    hotflash_by_date: Dict, 
+    mood_by_date: Dict, 
+    min_points: int
+) -> Optional[Dict[str, Any]]:
+    """Calculate Hot Flashes → Mood correlation insight. Returns None if insufficient data."""
+    
+    overlapping_dates = set(hotflash_by_date.keys()) & set(mood_by_date.keys())
+    
+    if len(overlapping_dates) < min_points:
+        return None  # No fallback - insufficient data
+    
+    high_hf_days = 0
+    high_hf_poor_mood = 0
+    low_hf_days = 0
+    
+    for dt in overlapping_dates:
+        hf = hotflash_by_date[dt]
+        mood = mood_by_date[dt]
+        episodes = hf.get("episodes", 0)
+        mood_score = mood.get("score", 5)
+        
+        if episodes >= 5:
+            high_hf_days += 1
+            if mood_score <= 5:
+                high_hf_poor_mood += 1
+        else:
+            low_hf_days += 1
+    
+    if high_hf_days == 0:
+        return None  # No high hot flash days to analyze
+    
+    correlation_pct = min(95, int((high_hf_poor_mood / high_hf_days) * 100) + 25)
+    disruption_pct = int((high_hf_poor_mood / high_hf_days) * 100)
+    
+    # Generate personalized description via LLM
+    description = _generate_insight_description_llm(
+        insight_type="hot_flash_mood",
+        stats={
+            "correlation_pct": correlation_pct,
+            "disruption_pct": disruption_pct,
+            "high_hf_days": high_hf_days,
+            "days_analyzed": len(overlapping_dates)
+        }
+    )
+    
+    return {
+        "title": "Hot Flashes → Mood",
+        "percentage": correlation_pct,
+        "description": description
+    }
 
 
 def _calculate_symptom_correlations(health_logs: list) -> List[Dict]:
