@@ -7,8 +7,14 @@ from collections import defaultdict
 
 from ai.models.perimenopause_models import (
     MenopauseSummary, VasomotorTracker, VasomotorEvent, SymptomMatrix, 
-    SymptomEntry, ClinicalExport, PerimenopauseInsights
+    SymptomEntry, ClinicalExport, PerimenopauseInsights, ReportPreview
 )
+
+# life_journeys has two duplicate rows for the same real-world journey
+# (id=4 "Peri / Menopause & Vitality", id=7 "Perimenopause/Menopause &
+# Vitality") - gate on both ids instead of a single title so users linked to
+# either variant are treated as having an active perimenopause journey.
+PERIMENOPAUSE_JOURNEY_IDS = [4, 7]
 
 
 # ============================================================================
@@ -45,6 +51,12 @@ TRIGGER_KEYWORDS = {
 }
 
 SYMPTOM_SEVERITY_MAP = {"none": 0, "mild": 1, "moderate": 2, "severe": 3}
+
+# Mood values are stored as emoji in health_logs.mood; map known emoji to a 1-10 score.
+# Unseen emoji fall back to a neutral score rather than crashing or defaulting to "sad".
+MOOD_EMOJI_SCORES = {
+    "😊": 8, "🙂": 6, "😐": 5, "🙁": 3, "😢": 2, "😡": 2,
+}
 
 
 # ============================================================================
@@ -108,65 +120,93 @@ def _normalize_symptoms(symptoms: Any) -> Dict[str, Any]:
 # MAIN API FUNCTIONS
 # ============================================================================
 
-def get_perimenopause_dashboard(user_id: int, period: str = "7d") -> Dict[str, Any]:
+def _empty_dashboard(user_id: int, period: str, journey_active: bool = False, message: Optional[str] = None) -> Dict[str, Any]:
+    """Honest empty-state dashboard for users with no data (or who don't exist yet).
+
+    Matches the same top-level shape the UI always expects, instead of an
+    ad-hoc {"status": "error", ...} dict that omits every field the frontend
+    depends on (transition_stage_tracker, vasomotor_tracker, etc.) and would
+    otherwise be returned with a misleading HTTP 200.
+
+    journey_active distinguishes "no active Perimenopause/Menopause journey"
+    from "journey active but no data logged yet" - both produce this same
+    zeroed-out shape otherwise, which a caller can't tell apart.
     """
-    Get complete perimenopause dashboard - UNIFIED endpoint for UI page with 3 tabs.
-    
-    Returns all data needed for:
-    - Tab 1 (Symptoms): Vasomotor tracker + GSM health
-    - Tab 2 (Insights): Symptom matrix with correlations
-    - Tab 3 (Export): Clinical export data
-    
-    Frontend handles tab switching by showing/hiding sections.
+    return {
+        "transition_stage_tracker": {
+            "menopause_stage": "unknown",
+            "is_in_perimenopause": False,
+            "months_since_last_period": None,
+            "last_period_date": None,
+            "cycle_status": "absent",
+        },
+        "vasomotor_tracker": _build_vasomotor_tracker([], period, date.today(), date.today()),
+        "gsm_health": _calculate_gsm_health([]),
+        "symptom_matrix": _build_symptom_matrix([], period, date.today(), date.today()),
+        "clinical_export": None,
+        "period_selected": period,
+        "tabs": ["Symptoms", "Insights", "Export"],
+        "journey_active": journey_active,
+        "message": message,
+    }
+
+
+def _fetch_period_health_logs(user_id: int, period: str) -> tuple:
+    """Fetch health_logs for a period, extending start_date back to the first
+    log if the user's earliest entry predates the nominal period window.
+    Returns (health_logs, start_date, end_date).
+    """
+    from ai.utils.db import get_connection
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        end_date = date.today()
+        start_date = end_date - timedelta(days={"7d": 7, "30d": 30, "90d": 90}.get(period, 7))
+
+        cursor.execute("""
+            SELECT log_date FROM health_logs
+            WHERE user_id = %s AND log_date >= %s
+            ORDER BY log_date ASC LIMIT 1
+        """, (user_id, start_date))
+        first_log = cursor.fetchone()
+        if first_log and first_log.get("log_date"):
+            start_date = first_log.get("log_date")
+
+        cursor.execute("""
+            SELECT log_date, mood, energy_level, symptoms, notes
+            FROM health_logs
+            WHERE user_id = %s AND log_date >= %s AND log_date <= %s
+            ORDER BY log_date ASC
+        """, (user_id, start_date, end_date))
+        health_logs = cursor.fetchall()
+
+    return health_logs, start_date, end_date
+
+
+def get_perimenopause_symptoms(user_id: int, period: str = "7d") -> Dict[str, Any]:
+    """
+    Get Symptoms tab data only - transition stage + vasomotor tracker + GSM health.
+
+    No LLM call - pure DB + Python, fast path for the default/most-viewed tab.
     """
     try:
-        # Get all three data sections
         summary = get_menopause_summary(user_id)
         if summary.get("status") == "error":
-            return summary
-        
-        # Get insights (vasomotor + symptoms matrix)
-        insights = get_perimenopause_insights(user_id, period, include=["vasomotor", "symptoms"])
-        if insights.get("status") == "error":
-            return insights
-        
-        # Get clinical export data (for Export tab)
-        from ai.utils.db import get_connection
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Get start/end dates for clinical export
-            end_date = date.today()
-            start_date = end_date - timedelta(days={"7d": 7, "30d": 30, "90d": 90}.get(period, 7))
-            
-            cursor.execute("""
-                SELECT log_date FROM health_logs
-                WHERE user_id = %s AND log_date >= %s
-                ORDER BY log_date ASC LIMIT 1
-            """, (user_id, start_date))
-            first_log = cursor.fetchone()
-            if first_log and first_log.get("log_date"):
-                start_date = first_log.get("log_date")
-            
-            # Fetch all health_logs for this period (needed for GSM health calculation)
-            cursor.execute("""
-                SELECT log_date, mood, energy_level, symptoms, notes
-                FROM health_logs
-                WHERE user_id = %s AND log_date >= %s AND log_date <= %s
-                ORDER BY log_date ASC
-            """, (user_id, start_date, end_date))
-            health_logs = cursor.fetchall()
-        
-        # Ensure start_date is not None before calling isoformat()
-        start_date_str = start_date.isoformat() if start_date else date.today().isoformat()
-        end_date_str = end_date.isoformat()
-        clinical_export = get_clinical_export(user_id, start_date_str, end_date_str)
-        if clinical_export.get("status") == "error":
-            clinical_export = None
-        
-        # Combine everything into one dashboard response
-        dashboard = {
-            # Tab 1: Symptoms (Vasomotor Tracker + GSM Health)
+            empty = _empty_dashboard(user_id, period, journey_active=False, message=summary.get("message"))
+            return {
+                "transition_stage_tracker": empty["transition_stage_tracker"],
+                "vasomotor_tracker": empty["vasomotor_tracker"],
+                "gsm_health": empty["gsm_health"],
+                "period_selected": period,
+                "tabs": ["Symptoms"],
+                "journey_active": False,
+                "message": summary.get("message"),
+            }
+
+        health_logs, start_date, end_date = _fetch_period_health_logs(user_id, period)
+        vasomotor_tracker = _build_vasomotor_tracker(health_logs, period, start_date, end_date)
+
+        return {
             "transition_stage_tracker": {
                 "menopause_stage": summary.get("menopause_stage"),
                 "is_in_perimenopause": summary.get("is_in_perimenopause"),
@@ -174,46 +214,84 @@ def get_perimenopause_dashboard(user_id: int, period: str = "7d") -> Dict[str, A
                 "last_period_date": summary.get("last_period_date"),
                 "cycle_status": summary.get("cycle_status")
             },
-            
-            # Tab 1: Vasomotor Tracker
-            "vasomotor_tracker": insights.get("vasomotor_tracker"),
-            
-            # Tab 1: GSM Health (Intimate & Urinary Health) - calculated from user data
-            "gsm_health": _calculate_gsm_health([
-                log for log in health_logs 
-                if start_date <= log.get("log_date") <= end_date
-            ]),
-            
-            # Tab 2: Symptom Matrix with Correlations
-            "symptom_matrix": insights.get("symptom_matrix"),
-            
-            # Tab 3: Clinical Export Data
-            "clinical_export": clinical_export,
-            
-            # Metadata
+            "vasomotor_tracker": vasomotor_tracker,
+            "gsm_health": _calculate_gsm_health(health_logs),
             "period_selected": period,
-            "tabs": ["Symptoms", "Insights", "Export"]
+            "tabs": ["Symptoms"],
+            "journey_active": True,
+            "message": None,
         }
-        
-        return dashboard
-    
+
     except Exception as e:
-        print(f"[ERROR] get_perimenopause_dashboard failed for user {user_id}: {e}")
+        print(f"[ERROR] get_perimenopause_symptoms failed for user {user_id}: {e}")
         return {"status": "error", "message": str(e), "user_id": user_id}
+
+
+def get_perimenopause_insights_tab(user_id: int, period: str = "7d") -> Dict[str, Any]:
+    """
+    Get Insights tab data only - symptom matrix with correlations.
+
+    No LLM call - pure DB + Python, kept separate from Export so opening
+    Insights never pays for the Export tab's clinical_export LLM latency.
+    """
+    try:
+        summary = get_menopause_summary(user_id)
+        if summary.get("status") == "error":
+            empty_matrix = _build_symptom_matrix([], period, date.today(), date.today())
+            return {
+                "symptom_matrix": empty_matrix,
+                "period_selected": period,
+                "tabs": ["Insights"],
+                "journey_active": False,
+                "message": summary.get("message"),
+            }
+
+        health_logs, start_date, end_date = _fetch_period_health_logs(user_id, period)
+        
+        # Fetch Terra wearable data for sleep/HRV
+        terra_data = _fetch_terra_sleep_data(user_id, start_date, end_date)
+        symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date, terra_data=terra_data)
+
+        return {
+            "symptom_matrix": symptom_matrix,
+            "period_selected": period,
+            "tabs": ["Insights"],
+            "journey_active": True,
+            "message": None,
+        }
+
+    except Exception as e:
+        print(f"[ERROR] get_perimenopause_insights_tab failed for user {user_id}: {e}")
+        return {"status": "error", "message": str(e), "user_id": user_id}
+
+
+
 
 
 def get_menopause_summary(user_id: int) -> Dict[str, Any]:
     """Get quick menopause status overview - UI Dashboard view."""
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey_by_ids
+        
+        # Gate on the Perimenopause/Menopause journey being active for this
+        # user - previously this endpoint only checked that the user exists,
+        # so any user with menstrual_cycles/health_logs rows (e.g. someone on
+        # the Cycle & Fertility journey) could get perimenopause staging that
+        # doesn't apply to them.
+        journey = get_active_journey_by_ids(user_id, PERIMENOPAUSE_JOURNEY_IDS)
+        if not journey:
+            profile = get_user_profile(user_id)
+            if not profile:
+                return {"status": "error", "message": "User not found"}
+            return {
+                "status": "error",
+                "message": f"User {user_id} does not have an active Perimenopause/Menopause journey.",
+            }
         
         with get_connection() as conn:
             cursor = conn.cursor()
             
-            # Verify user is in perimenopause life stage
             profile = get_user_profile(user_id)
-            if not profile:
-                return {"status": "error", "message": "User not found"}
             
             # Get menstrual cycle data
             cursor.execute("""
@@ -234,8 +312,23 @@ def get_menopause_summary(user_id: int) -> Dict[str, Any]:
             """, (user_id,))
             health_logs = cursor.fetchall()
             
+            # Wider window for symptom-cluster assessment - staging should
+            # look at a recent pattern, not just the last 7 days used for the
+            # daily-average metrics below.
+            cursor.execute("""
+                SELECT symptoms
+                FROM health_logs
+                WHERE user_id = %s AND log_date >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+            """, (user_id,))
+            symptom_window_logs = cursor.fetchall()
+            supporting_symptom_count = _count_supporting_symptoms(symptom_window_logs)
+            
+            user_age = profile.get("age")
+            
             # Determine menopause stage
-            menopause_stage, months_since_last_period = _determine_menopause_stage(cycles)
+            menopause_stage, months_since_last_period = _determine_menopause_stage(
+                cycles, age=user_age, supporting_symptom_count=supporting_symptom_count
+            )
             
             # Parse vasomotor events from last 7 days
             hot_flash_count = 0
@@ -253,11 +346,11 @@ def get_menopause_summary(user_id: int) -> Dict[str, Any]:
             # Parse symptoms
             primary_symptoms = _extract_top_symptoms(health_logs)
             
-            # Calculate mood stability
+            # Calculate mood stability (mood is stored as emoji, not English words)
             moods = []
             for log in health_logs:
                 if log.get("mood"):
-                    mood_score = {"happy": 8, "neutral": 5, "sad": 2, "anxious": 3, "irritable": 2}.get(log.get("mood"), 5)
+                    mood_score = MOOD_EMOJI_SCORES.get(log.get("mood"), 5)
                     moods.append(mood_score)
             mood_stability = int((sum(moods) / len(moods) / 10 * 100)) if moods else 50
             
@@ -282,7 +375,7 @@ def get_menopause_summary(user_id: int) -> Dict[str, Any]:
             else:
                 overall_severity = "mild"
             
-            return MenopauseSummary(
+            result = MenopauseSummary(
                 is_in_perimenopause=menopause_stage == "perimenopause",
                 menopause_stage=menopause_stage,
                 months_since_last_period=months_since_last_period,
@@ -298,6 +391,10 @@ def get_menopause_summary(user_id: int) -> Dict[str, Any]:
                 active_alerts=alerts,
                 recommended_actions=_get_recommendations(menopause_stage, primary_symptoms)
             ).model_dump(exclude_none=False)
+            result["profile_id"] = journey["profile_id"]
+            result["journey_id"] = journey["journey_id"]
+            result["journey_title"] = journey["journey_title"]
+            return result
     
     except Exception as e:
         print(f"[ERROR] get_menopause_summary failed for user {user_id}: {e}")
@@ -346,6 +443,9 @@ def get_perimenopause_insights(
             # Get menopause summary
             summary = get_menopause_summary(user_id)
             
+            # Fetch Terra wearable data for sleep/HRV
+            terra_data = _fetch_terra_sleep_data(user_id, start_date, end_date)
+            
             result = {"summary": summary}
             
             # Build vasomotor tracker if requested
@@ -353,9 +453,9 @@ def get_perimenopause_insights(
                 vasomotor = _build_vasomotor_tracker(health_logs, period, start_date, end_date)
                 result["vasomotor_tracker"] = vasomotor
             
-            # Build symptom matrix if requested
+            # Build symptom matrix if requested (with Terra data)
             if "symptoms" in include:
-                symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date)
+                symptom_matrix = _build_symptom_matrix(health_logs, period, start_date, end_date, terra_data=terra_data)
                 result["symptom_matrix"] = symptom_matrix
             
             return result
@@ -365,6 +465,34 @@ def get_perimenopause_insights(
         return {"status": "error", "message": str(e), "user_id": user_id}
 
 
+def get_perimenopause_export(user_id: int, period: str = "7d") -> Dict[str, Any]:
+    """
+    Get Export tab data only - clinical_export with LLM-generated recommendations.
+
+    period-based wrapper around get_clinical_export, matching the signature of
+    get_perimenopause_symptoms/get_perimenopause_insights_tab so all 3 tabs
+    can be called independently. This is the only one of the 3 tab endpoints
+    that makes an LLM call, so it should be requested on-demand (tab opened /
+    Export button clicked), not on every dashboard load.
+    """
+    end_date = date.today()
+    start_date = end_date - timedelta(days={"7d": 7, "30d": 30, "90d": 90}.get(period, 7))
+    result = get_clinical_export(user_id, start_date.isoformat(), end_date.isoformat())
+    if result.get("status") == "error":
+        return {
+            "clinical_export": None,
+            "tabs": ["Export"],
+            "journey_active": False,
+            "message": result.get("message"),
+        }
+    return {
+        "clinical_export": result,
+        "tabs": ["Export"],
+        "journey_active": True,
+        "message": None,
+    }
+
+
 def get_clinical_export(
     user_id: int,
     start_date: str,
@@ -372,8 +500,33 @@ def get_clinical_export(
 ) -> Dict[str, Any]:
     """Get clinical export ready for sharing with healthcare provider."""
     try:
-        from ai.utils.db import get_connection
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey_by_ids
         from ai.utils.llm_call import llm_call
+        
+        journey = get_active_journey_by_ids(user_id, PERIMENOPAUSE_JOURNEY_IDS)
+        if not journey:
+            return {
+                "status": "error",
+                "message": f"User {user_id} does not have an active Perimenopause/Menopause journey.",
+            }
+        
+        # Get journey created_at for stage duration calculation
+        journey_created_at = None
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT ljp.created_at
+                FROM life_journey_profile ljp
+                JOIN profiles p ON p.id = ljp.profile_id
+                WHERE p.user_id = %s AND ljp.life_journey_id IN (%s, %s)
+                ORDER BY ljp.created_at ASC
+                LIMIT 1
+            """, (user_id, *PERIMENOPAUSE_JOURNEY_IDS[:2]))
+            journey_row = cursor.fetchone()
+            if journey_row and journey_row.get("created_at"):
+                journey_created_at = journey_row["created_at"]
+                if isinstance(journey_created_at, date) and not isinstance(journey_created_at, datetime):
+                    journey_created_at = datetime.combine(journey_created_at, datetime.min.time())
         
         with get_connection() as conn:
             cursor = conn.cursor()
@@ -401,14 +554,36 @@ def get_clinical_export(
             """, (user_id,))
             cycles = cursor.fetchall()
             
+            profile = get_user_profile(user_id)
+            user_age = profile.get("age") if profile else None
+            supporting_symptom_count = _count_supporting_symptoms(health_logs)
+            
             # Determine stage
-            menopause_stage, months_since_last = _determine_menopause_stage(cycles)
+            menopause_stage, months_since_last = _determine_menopause_stage(
+                cycles, age=user_age, supporting_symptom_count=supporting_symptom_count
+            )
+            
+            # Get real FSH lab value if available - clinical_recommendations
+            # and suggested_tests below previously referenced FSH only as
+            # static boilerplate text with no connection to actual lab data.
+            cursor.execute("""
+                SELECT biomarkers
+                FROM lab_reports
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (user_id,))
+            latest_lab = cursor.fetchone()
+            fsh_value, fsh_status = _extract_fsh_from_biomarkers(latest_lab.get("biomarkers") if latest_lab else None)
+            
+            # Fetch Terra wearable data for sleep
+            terra_data = _fetch_terra_sleep_data(user_id, start, end)
             
             # Get vasomotor data
             vasomotor = _build_vasomotor_tracker(health_logs, "custom", start, end)
             
-            # Get symptom data
-            symptom_matrix = _build_symptom_matrix(health_logs, "custom", start, end)
+            # Get symptom data (with Terra)
+            symptom_matrix = _build_symptom_matrix(health_logs, "custom", start, end, terra_data=terra_data)
             
             # Compile metrics
             primary_symptoms = _extract_top_symptoms(health_logs)
@@ -426,18 +601,26 @@ def get_clinical_export(
                     most_common = max(severity_counts, key=severity_counts.get)
                     symptom_severity_breakdown[symptom] = most_common
             
-            # Calculate sleep quality
-            sleep_hours = []
+            # Calculate sleep - prefer Terra wearable data
+            avg_sleep_hours = None
+            if terra_data and terra_data.get("has_data") and terra_data.get("avg_sleep_hours") is not None:
+                avg_sleep_hours = terra_data["avg_sleep_hours"]
+            
+            # Fallback to health_logs
+            if avg_sleep_hours is None:
+                sleep_hours = []
+                for log in health_logs:
+                    symptoms = _normalize_symptoms(log.get("symptoms"))
+                    if symptoms.get("sleep_hours"):
+                        sleep_hours.append(symptoms.get("sleep_hours"))
+                avg_sleep_hours = sum(sleep_hours) / len(sleep_hours) if sleep_hours else 7
+            
             sleep_quality_scores = []
             for log in health_logs:
                 symptoms = _normalize_symptoms(log.get("symptoms"))
-                if symptoms.get("sleep_hours"):
-                    sleep_hours.append(symptoms.get("sleep_hours"))
                 if symptoms.get("sleep_quality"):
                     sq_map = {"poor": 1, "fair": 2, "good": 3, "excellent": 4}
                     sleep_quality_scores.append(sq_map.get(symptoms.get("sleep_quality"), 2))
-            
-            avg_sleep_hours = sum(sleep_hours) / len(sleep_hours) if sleep_hours else 7
             sleep_quality_avg = sum(sleep_quality_scores) / len(sleep_quality_scores) if sleep_quality_scores else 2
             sleep_quality_labels = {1: "poor", 2: "fair", 3: "good", 4: "excellent"}
             sleep_quality = sleep_quality_labels.get(round(sleep_quality_avg), "fair")
@@ -446,13 +629,17 @@ def get_clinical_export(
             symptom_summary = ", ".join(primary_symptoms) if primary_symptoms else "No symptoms recorded"
             sleep_summary = f"{avg_sleep_hours:.1f} hours per night"
             vasomotor_summary = f"{vasomotor.get('avg_daily_frequency', 0):.1f} events per day"
+            age_summary = f"{user_age} years old" if user_age else "age not on file"
+            fsh_summary = f"{fsh_value} ({fsh_status})" if fsh_value is not None else "no recent FSH lab on file"
             
             llm_prompt = f"""
 Based on menopause data from {start} to {end}:
 - Stage: {menopause_stage}
+- Patient age: {age_summary}
 - Primary symptoms: {symptom_summary}
 - Average sleep: {sleep_summary}
 - Hot flashes: {vasomotor_summary}
+- Latest FSH: {fsh_summary}
 
 Provide 3-4 specific clinical recommendations for a gynecologist.
 Format as bullet points.
@@ -485,6 +672,12 @@ Format as bullet points.
                 warning_flags.append("Severe vasomotor symptoms - Consider HRT evaluation")
             if symptom_matrix.get("avg_mood_stability_percent", 50) < 40:
                 warning_flags.append("Significant mood instability - Mental health support recommended")
+            if fsh_status == "elevated":
+                warning_flags.append(f"FSH elevated ({fsh_value}) - Correlate with menstrual history")
+            if menopause_stage == "insufficient_data" and (user_age or 0) >= MIN_PLAUSIBLE_PERIMENOPAUSE_AGE:
+                warning_flags.append(
+                    "Age-appropriate but insufficient cycle/symptom history to confirm stage - continue monitoring"
+                )
             
             # Suggested tests
             suggested_tests = [
@@ -496,7 +689,40 @@ Format as bullet points.
                 "Lipid panel"
             ]
             
-            return ClinicalExport(
+            # Calculate GSM health for report preview
+            gsm_health = _calculate_gsm_health(health_logs)
+            
+            # Determine period string from date range
+            days_in_period = (end - start).days
+            if days_in_period <= 7:
+                period_str = "7d"
+            elif days_in_period <= 30:
+                period_str = "30d"
+            else:
+                period_str = "90d"
+            
+            # Build report preview (clean UI summary)
+            # Pass user_age for clinical integrity - prevents labeling young users as perimenopause
+            # Pass user_id and date range for dynamic data queries (vasomotor_logs, perimenopause_profiles)
+            report_preview = _build_report_preview(
+                user_id=user_id,
+                journey_created_at=journey_created_at,
+                menopause_stage=menopause_stage,
+                months_since_last_period=months_since_last,
+                health_logs=health_logs,
+                period=period_str,
+                days_in_period=days_in_period,
+                start_date=start,
+                end_date=end,
+                terra_data=terra_data,
+                mood_stability_percent=symptom_matrix.get("avg_mood_stability_percent", 50),
+                gsm_health=gsm_health,
+                fsh_value=fsh_value,
+                fsh_status=fsh_status,
+                user_age=user_age
+            )
+            
+            result = ClinicalExport(
                 export_date=datetime.now().strftime("%b %d, %Y"),
                 period_covered=f"{start.strftime('%b %d')} - {end.strftime('%b %d, %Y')}",
                 menopause_stage=menopause_stage,
@@ -522,8 +748,16 @@ Format as bullet points.
                 warning_flags=warning_flags,
                 suggested_tests=suggested_tests,
                 data_points_collected=len(health_logs),
-                data_completeness_percent=int((len(health_logs) / max(1, (end - start).days)) * 100)
+                data_completeness_percent=min(100, int((len(health_logs) / max(1, (end - start).days)) * 100))
             ).model_dump(exclude_none=False)
+            result["profile_id"] = journey["profile_id"]
+            result["journey_id"] = journey["journey_id"]
+            result["journey_title"] = journey["journey_title"]
+            
+            # Add report_preview - clean UI summary with 6 personalized fields
+            result["report_preview"] = report_preview
+            
+            return result
     
     except Exception as e:
         print(f"[ERROR] get_clinical_export failed for user {user_id}: {e}")
@@ -534,8 +768,594 @@ Format as bullet points.
 # HELPER FUNCTIONS
 # ============================================================================
 
-def _determine_menopause_stage(cycles: list) -> tuple:
-    """Determine menopause stage based on menstrual cycles."""
+
+def _fetch_terra_sleep_data(user_id: int, start_date: date, end_date: date) -> Dict[str, Any]:
+    """Fetch sleep/HRV data from terra_activity_data for perimenopause insights.
+    
+    Returns dict with avg_sleep_hours, avg_hrv, sleep_score, has_data flag.
+    Structure-safe: returns None values (not defaults) when no data exists.
+    """
+    try:
+        from ai.utils.db import get_connection
+        
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT payload, created_at
+                FROM terra_activity_data
+                WHERE user_id = %s 
+                  AND created_at >= %s
+                  AND created_at <= %s
+                ORDER BY created_at DESC
+                LIMIT 30
+                """,
+                (user_id, start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()),
+            )
+            rows = cursor.fetchall()
+            
+            if not rows:
+                return {
+                    "avg_sleep_hours": None,
+                    "avg_hrv": None,
+                    "sleep_score": None,
+                    "recovery_score": None,
+                    "has_data": False,
+                }
+            
+            sleep_scores = []
+            hrv_values = []
+            recovery_scores = []
+            
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                
+                # Extract sleep score from scores dict
+                try:
+                    scores = payload.get("scores", {})
+                    if scores.get("sleep") is not None:
+                        sleep_scores.append(float(scores["sleep"]))
+                    if scores.get("recovery") is not None:
+                        recovery_scores.append(float(scores["recovery"]))
+                    
+                    # Also check nested data structure
+                    data_list = payload.get("data", [])
+                    if data_list and isinstance(data_list, list):
+                        for data_item in data_list:
+                            nested_scores = data_item.get("scores", {})
+                            if nested_scores.get("sleep") is not None:
+                                sleep_scores.append(float(nested_scores["sleep"]))
+                except (ValueError, TypeError, AttributeError):
+                    pass
+                
+                # Extract HRV
+                try:
+                    data_list = payload.get("data", [])
+                    if data_list and isinstance(data_list, list):
+                        for data_item in data_list:
+                            hrv = data_item.get("heart_data", {}).get("heart_rate_data", {}).get("summary", {}).get("avg_hrv_rmssd")
+                            if hrv is not None:
+                                hrv_values.append(float(hrv))
+                except (ValueError, TypeError, AttributeError, IndexError):
+                    pass
+            
+            # Calculate averages - return None if no valid data
+            avg_sleep_score = sum(sleep_scores) / len(sleep_scores) if sleep_scores else None
+            avg_hrv = sum(hrv_values) / len(hrv_values) if hrv_values else None
+            avg_recovery = sum(recovery_scores) / len(recovery_scores) if recovery_scores else None
+            
+            # Convert sleep score to hours estimate (score is typically 0-100 scale)
+            # This is approximate - actual sleep duration would need sleep_durations_data
+            avg_sleep_hours = None
+            if avg_sleep_score is not None:
+                # Map score to hours: score 80+ = 7-8hrs, 60-80 = 6-7hrs, <60 = 5-6hrs
+                avg_sleep_hours = round(5 + (avg_sleep_score / 100) * 3, 1)
+            
+            return {
+                "avg_sleep_hours": avg_sleep_hours,
+                "avg_hrv": round(avg_hrv, 1) if avg_hrv else None,
+                "sleep_score": round(avg_sleep_score, 1) if avg_sleep_score else None,
+                "recovery_score": round(avg_recovery, 1) if avg_recovery else None,
+                "has_data": bool(sleep_scores or hrv_values),
+            }
+    except Exception as e:
+        print(f"[ERROR] _fetch_terra_sleep_data for user {user_id}: {e}")
+        return {"avg_sleep_hours": None, "avg_hrv": None, "has_data": False}
+
+
+# Perimenopause onset before this age is clinically atypical (suggestive of
+# POI/thyroid/PCOS rather than a default assumption) per ACOG/STRAW+10
+# guidance, so age-gating avoids mislabeling young irregular cycles.
+MIN_PLAUSIBLE_PERIMENOPAUSE_AGE = 35
+
+# Vasomotor/sleep/mood/GSM symptom keys STRAW+10-style staging treats as
+# supporting evidence for perimenopause when clustered alongside cycle
+# irregularity - a single incidental symptom is not diagnostic on its own.
+PERIMENOPAUSE_SUPPORTING_SYMPTOMS = {
+    "hot_flashes", "hot_flash", "night_sweats", "night_sweat",
+    "vaginal_dryness", "urinary_frequency", "pelvic_discomfort", "libido_impact",
+    "brain_fog", "insomnia",
+}
+MIN_SUPPORTING_SYMPTOMS_FOR_PERIMENOPAUSE = 2
+
+
+def _count_supporting_symptoms(health_logs: list) -> int:
+    """Count distinct perimenopause-supporting symptoms logged (not raw occurrences)."""
+    found = set()
+    for log in health_logs:
+        symptoms = _normalize_symptoms(log.get("symptoms"))
+        for key, value in symptoms.items():
+            if key in PERIMENOPAUSE_SUPPORTING_SYMPTOMS and value and value not in ("none", "None", 0):
+                found.add(key)
+    return len(found)
+
+
+def _extract_fsh_from_biomarkers(biomarkers_data: Any) -> tuple[Optional[str], Optional[str]]:
+    """Extract FSH value and status from lab_reports.biomarkers JSON.
+
+    Returns (fsh_value_string, status) where status is "elevated", "normal",
+    or None if no FSH found. This connects real lab data (not static boilerplate)
+    to clinical recommendations and warning flags.
+    """
+    if not biomarkers_data:
+        return None, None
+    
+    try:
+        if isinstance(biomarkers_data, str):
+            biomarkers_data = json.loads(biomarkers_data)
+        
+        needs_attention = biomarkers_data.get("needs_attention") or []
+        normal_results = biomarkers_data.get("normal_results") or []
+        
+        def _is_valid_fsh_value(value: Any) -> bool:
+            """Check if FSH value is a valid numeric reading, not 'Not found' or empty."""
+            if not value:
+                return False
+            value_str = str(value).strip().lower()
+            # Invalid values from OCR/parsing failures
+            if value_str in ("not found", "n/a", "na", "none", "", "-", "pending"):
+                return False
+            # Try to extract a numeric value
+            try:
+                # Handle values like "18.4 mIU/mL" or just "18.4"
+                numeric_part = ''.join(c for c in value_str.split()[0] if c.isdigit() or c == '.')
+                if numeric_part:
+                    float(numeric_part)
+                    return True
+            except (ValueError, IndexError):
+                pass
+            return False
+        
+        for biomarker in needs_attention:
+            if biomarker.get("name", "").upper() == "FSH":
+                value = biomarker.get("value")
+                if _is_valid_fsh_value(value):
+                    return value, "elevated"
+        
+        for biomarker in normal_results:
+            if biomarker.get("name", "").upper() == "FSH":
+                value = biomarker.get("value")
+                if _is_valid_fsh_value(value):
+                    return value, "normal"
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    
+    return None, None
+
+
+# ============================================================================
+# REPORT PREVIEW HELPER FUNCTIONS - Dynamic UI Fields
+# ============================================================================
+
+def _calculate_stage_display(
+    journey_created_at: Optional[datetime],
+    menopause_stage: str,
+    months_since_last_period: Optional[int],
+    user_age: Optional[int] = None
+) -> Optional[str]:
+    """
+    Calculate stage display string for UI Report Preview.
+    
+    Returns format like "Year 2 (confirmed)" or "Perimenopause (tracking)"
+    Returns None for age-implausible users (under 35) with unknown/insufficient data.
+    
+    Clinical integrity: Perimenopause typically occurs 40-55, rarely before 35.
+    We don't label young users as "Perimenopause" without clinical evidence.
+    """
+    if not journey_created_at:
+        return None
+    
+    # Age-based validation: Don't display perimenopause stage for young users
+    # unless there's confirmed clinical evidence (actual perimenopause/menopause stage)
+    age_is_plausible = user_age is None or user_age >= MIN_PLAUSIBLE_PERIMENOPAUSE_AGE
+    
+    # For age-implausible users with unknown/insufficient data, return None
+    # This prevents labeling an 18-year-old as "Perimenopause"
+    if not age_is_plausible and menopause_stage in ("unknown", "insufficient_data", "regular_cycles"):
+        return None
+    
+    # For age-plausible users with unknown/insufficient data, show tracking status
+    if menopause_stage in ("unknown", "insufficient_data"):
+        if age_is_plausible:
+            return "Tracking (awaiting data)"
+        return None
+    
+    # For regular cycles (not perimenopause), return appropriate message
+    if menopause_stage == "regular_cycles":
+        return "Regular cycles (not in perimenopause)"
+    
+    # Calculate years in journey for confirmed stages
+    days_in_journey = (datetime.now() - journey_created_at).days
+    years_in_journey = max(1, days_in_journey // 365)
+    
+    # Determine confirmation status
+    # Menopause is "confirmed" after 12+ months without period
+    if months_since_last_period and months_since_last_period >= 12:
+        confirmation = "confirmed"
+    elif menopause_stage in ("menopause", "postmenopause"):
+        confirmation = "confirmed"
+    elif menopause_stage == "perimenopause":
+        confirmation = "tracking"
+    else:
+        confirmation = "tracking"
+    
+    # Format stage name for display
+    stage_display = menopause_stage.replace("_", " ").title()
+    
+    return f"{stage_display} · Year {years_in_journey} ({confirmation})"
+
+
+def _calculate_hot_flash_display(
+    user_id: int,
+    period: str,
+    start_date: date,
+    end_date: date
+) -> Optional[str]:
+    """
+    Calculate hot flash frequency display for UI Report Preview.
+    
+    Data source: vasomotor_logs table (primary), perimenopause_profiles (fallback)
+    
+    Returns format like "4.3/day (this month)"
+    """
+    from ai.utils.db import get_connection
+    
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Primary source: vasomotor_logs - real tracked data
+            cursor.execute("""
+                SELECT 
+                    SUM(total_episodes) as total,
+                    COUNT(*) as days_logged
+                FROM vasomotor_logs
+                WHERE user_id = %s 
+                  AND log_date >= %s 
+                  AND log_date <= %s
+            """, (user_id, start_date, end_date))
+            
+            result = cursor.fetchone()
+            
+            if result and result.get("total") and result.get("days_logged", 0) > 0:
+                total_episodes = result["total"]
+                days_logged = result["days_logged"]
+                
+                # Calculate average over days WITH data (more accurate)
+                avg_per_day = total_episodes / days_logged
+                
+                # Format period label
+                period_label = {
+                    "7d": "this week",
+                    "30d": "this month",
+                    "90d": "past 3 months"
+                }.get(period, "selected period")
+                
+                return f"{avg_per_day:.1f}/day ({period_label})"
+            
+            # Fallback: perimenopause_profiles (pre-computed value)
+            cursor.execute("""
+                SELECT avg_hot_flashes_per_day
+                FROM perimenopause_profiles
+                WHERE user_id = %s
+                LIMIT 1
+            """, (user_id,))
+            
+            profile = cursor.fetchone()
+            if profile and profile.get("avg_hot_flashes_per_day"):
+                avg = profile["avg_hot_flashes_per_day"]
+                period_label = {
+                    "7d": "this week",
+                    "30d": "this month", 
+                    "90d": "past 3 months"
+                }.get(period, "selected period")
+                return f"{avg:.1f}/day ({period_label})"
+            
+            return None
+            
+    except Exception as e:
+        print(f"[ERROR] _calculate_hot_flash_display failed: {e}")
+        return None
+
+
+def _calculate_sleep_disruption_display(
+    user_id: int,
+    health_logs: list,
+    terra_data: Optional[Dict[str, Any]],
+    days_in_period: int
+) -> Optional[str]:
+    """
+    Calculate sleep disruption display for UI Report Preview.
+    
+    Data sources: health_logs, terra_data, perimenopause_profiles (fallback)
+    
+    Returns format like "3.2 nights/week"
+    """
+    from ai.utils.db import get_connection
+    
+    disrupted_nights = 0
+    
+    # Count disrupted nights from health logs
+    for log in health_logs:
+        symptoms = _normalize_symptoms(log.get("symptoms"))
+        
+        # Check for explicit sleep disruption
+        sleep_disruption = symptoms.get("sleep_disruption")
+        if sleep_disruption and sleep_disruption not in ("none", "None"):
+            disrupted_nights += 1
+            continue
+        
+        # Check for poor sleep quality
+        sleep_quality = symptoms.get("sleep_quality")
+        if sleep_quality in ("poor", "very_poor"):
+            disrupted_nights += 1
+            continue
+        
+        # Check for low sleep hours (< 6 hours = disrupted)
+        sleep_hours = symptoms.get("sleep_hours")
+        if sleep_hours is not None:
+            try:
+                if float(sleep_hours) < 6:
+                    disrupted_nights += 1
+                    continue
+            except (ValueError, TypeError):
+                pass
+        
+        # Check for night sweats (implies disrupted sleep)
+        night_sweat_val = symptoms.get("night_sweat") or symptoms.get("night_sweats")
+        if night_sweat_val and night_sweat_val not in ("none", "None", "0", 0):
+            disrupted_nights += 1
+    
+    # Also check Terra wearable data for sleep score
+    if terra_data and terra_data.get("has_data"):
+        terra_sleep_score = terra_data.get("sleep_score")
+        if terra_sleep_score is not None and terra_sleep_score < 60:
+            # Low sleep score from wearable indicates disruption
+            pass  # Terra data supplements, doesn't replace log data
+    
+    if disrupted_nights > 0:
+        weeks_in_period = max(1, days_in_period / 7)
+        avg_per_week = disrupted_nights / weeks_in_period
+        return f"{avg_per_week:.1f} nights/week"
+    
+    # Fallback: perimenopause_profiles (pre-computed value)
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT sleep_disruption_nights_per_week
+                FROM perimenopause_profiles
+                WHERE user_id = %s
+                LIMIT 1
+            """, (user_id,))
+            
+            profile = cursor.fetchone()
+            if profile and profile.get("sleep_disruption_nights_per_week"):
+                return f"{profile['sleep_disruption_nights_per_week']:.1f} nights/week"
+    except Exception as e:
+        print(f"[ERROR] _calculate_sleep_disruption_display fallback failed: {e}")
+    
+    return None
+
+
+def _calculate_mood_instability_display(
+    health_logs: list,
+    mood_stability_percent: int
+) -> Optional[str]:
+    """
+    Calculate mood instability label for UI Report Preview.
+    
+    Returns format like "Mild", "Mild–Moderate", "Moderate–Severe"
+    """
+    if not health_logs:
+        return None
+    
+    # Check if any mood data exists
+    has_mood_data = any(log.get("mood") for log in health_logs)
+    if not has_mood_data:
+        return None
+    
+    # Map stability percentage to instability label
+    # Higher stability = lower instability
+    if mood_stability_percent >= 80:
+        return "Stable"
+    elif mood_stability_percent >= 65:
+        return "Mild"
+    elif mood_stability_percent >= 50:
+        return "Mild–Moderate"
+    elif mood_stability_percent >= 35:
+        return "Moderate"
+    elif mood_stability_percent >= 20:
+        return "Moderate–Severe"
+    else:
+        return "Severe"
+
+
+def _calculate_gsm_symptoms_display(gsm_health: Dict[str, Dict]) -> Optional[str]:
+    """
+    Calculate GSM symptoms summary for UI Report Preview.
+    
+    Returns format like "Mild dryness & frequency"
+    """
+    if not gsm_health:
+        return None
+    
+    active_symptoms = []
+    
+    # Check each GSM symptom
+    symptom_labels = {
+        "vaginal_dryness": "dryness",
+        "urinary_frequency": "frequency",
+        "pelvic_discomfort": "discomfort",
+        "libido_impact": "libido changes"
+    }
+    
+    for symptom_key, label in symptom_labels.items():
+        symptom_data = gsm_health.get(symptom_key, {})
+        level = symptom_data.get("level")
+        
+        if level and level not in ("not_reported", "none", "None"):
+            # Format as "Mild dryness" or "Moderate frequency"
+            level_display = level.title()
+            active_symptoms.append(f"{level_display} {label}")
+    
+    if not active_symptoms:
+        return None
+    
+    # Join with " & " for clean display
+    if len(active_symptoms) == 1:
+        return active_symptoms[0]
+    elif len(active_symptoms) == 2:
+        return f"{active_symptoms[0]} & {active_symptoms[1]}"
+    else:
+        # More than 2: "X, Y & Z"
+        return f"{', '.join(active_symptoms[:-1])} & {active_symptoms[-1]}"
+
+
+def _calculate_fsh_reading_display(
+    user_id: int,
+    fsh_value: Optional[str],
+    fsh_status: Optional[str]
+) -> Optional[str]:
+    """
+    Calculate FSH reading display for UI Report Preview.
+    
+    Data sources: lab_reports.biomarkers (primary), perimenopause_profiles.fsh_level (fallback)
+    
+    Returns format like "18.4 mIU/mL (elevated)"
+    """
+    from ai.utils.db import get_connection
+    
+    # Use lab_reports FSH if available
+    if fsh_value:
+        value_str = str(fsh_value).strip()
+        
+        # Check if it already has units
+        if "mIU" in value_str or "IU" in value_str:
+            display_value = value_str
+        else:
+            display_value = f"{value_str} mIU/mL"
+        
+        # Add status if available
+        if fsh_status:
+            return f"{display_value} ({fsh_status})"
+        return display_value
+    
+    # Fallback: perimenopause_profiles.fsh_level
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT fsh_level
+                FROM perimenopause_profiles
+                WHERE user_id = %s
+                LIMIT 1
+            """, (user_id,))
+            
+            profile = cursor.fetchone()
+            if profile and profile.get("fsh_level"):
+                fsh_level = profile["fsh_level"]
+                # Determine status based on typical FSH ranges
+                # Elevated: >25 mIU/mL suggests perimenopause
+                # Normal: <10 mIU/mL in reproductive age
+                if fsh_level >= 25:
+                    status = "elevated"
+                elif fsh_level >= 10:
+                    status = "borderline"
+                else:
+                    status = "normal"
+                return f"{fsh_level:.1f} mIU/mL ({status})"
+    except Exception as e:
+        print(f"[ERROR] _calculate_fsh_reading_display fallback failed: {e}")
+    
+    return None
+
+
+def _build_report_preview(
+    user_id: int,
+    journey_created_at: Optional[datetime],
+    menopause_stage: str,
+    months_since_last_period: Optional[int],
+    health_logs: list,
+    period: str,
+    days_in_period: int,
+    start_date: date,
+    end_date: date,
+    terra_data: Optional[Dict[str, Any]],
+    mood_stability_percent: int,
+    gsm_health: Dict[str, Dict],
+    fsh_value: Optional[str],
+    fsh_status: Optional[str],
+    user_age: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Build the complete Report Preview for UI.
+    
+    Returns a clean dict with 6 fields, each nullable if data is missing.
+    Respects clinical integrity - won't label young users as perimenopause.
+    
+    Data sources:
+    - stage: journey_created_at, menopause_stage, user_age
+    - avg_hot_flashes: vasomotor_logs (primary), perimenopause_profiles (fallback)
+    - sleep_disruption: health_logs, perimenopause_profiles (fallback)
+    - mood_instability: health_logs, mood_stability_percent
+    - gsm_symptoms: gsm_health dict
+    - last_fsh_reading: lab_reports (primary), perimenopause_profiles (fallback)
+    """
+    return ReportPreview(
+        stage=_calculate_stage_display(
+            journey_created_at, menopause_stage, months_since_last_period, user_age
+        ),
+        avg_hot_flashes=_calculate_hot_flash_display(
+            user_id, period, start_date, end_date
+        ),
+        sleep_disruption=_calculate_sleep_disruption_display(
+            user_id, health_logs, terra_data, days_in_period
+        ),
+        mood_instability=_calculate_mood_instability_display(
+            health_logs, mood_stability_percent
+        ),
+        gsm_symptoms=_calculate_gsm_symptoms_display(gsm_health),
+        last_fsh_reading=_calculate_fsh_reading_display(user_id, fsh_value, fsh_status)
+    ).model_dump()
+
+
+def _determine_menopause_stage(
+    cycles: list,
+    age: Optional[int] = None,
+    supporting_symptom_count: int = 0,
+) -> tuple:
+    """Determine menopause stage based on menstrual cycles, age, and symptom clustering.
+
+    Cycle irregularity alone is not diagnostic - real staging (STRAW+10/ACOG)
+    considers age plausibility and clustered vasomotor/sleep/mood/GSM symptoms
+    alongside cycle history. age and supporting_symptom_count are optional so
+    existing callers without that data still get a safe (insufficient_data)
+    result rather than a crash.
+    """
     if not cycles:
         return "unknown", None
     
@@ -551,9 +1371,12 @@ def _determine_menopause_stage(cycles: list) -> tuple:
     
     months_since = (date.today() - last_period).days // 30
     
-    # Check cycle regularity
+    # Check cycle regularity. Regularity can only be assessed with >=3 completed
+    # cycles - fewer than that means there isn't enough evidence either way.
     completed_cycles = [c for c in cycles if c.get("is_completed")]
-    if len(completed_cycles) >= 3:
+    has_enough_data_for_regularity = len(completed_cycles) >= 3
+    is_irregular = False
+    if has_enough_data_for_regularity:
         cycle_lengths = []
         for i in range(len(completed_cycles) - 1):
             if completed_cycles[i].get("period_end_date") and completed_cycles[i+1].get("period_end_date"):
@@ -563,18 +1386,41 @@ def _determine_menopause_stage(cycles: list) -> tuple:
                     cycle_lengths.append(length)
         
         is_irregular = len(cycle_lengths) >= 2 and max(cycle_lengths) - min(cycle_lengths) > 7
-    else:
-        is_irregular = False
     
-    # Determine stage
-    if months_since < 12 and is_irregular:
-        return "perimenopause", months_since
+    # Age-implausible irregular cycles (e.g. a 22-year-old) should not be
+    # labeled perimenopause - flag separately rather than silently guessing.
+    age_implausible = age is not None and age < MIN_PLAUSIBLE_PERIMENOPAUSE_AGE
+    
+    has_symptom_cluster = supporting_symptom_count >= MIN_SUPPORTING_SYMPTOMS_FOR_PERIMENOPAUSE
+    
+    # Determine stage. The previous fallback silently returned "perimenopause"
+    # for any case that didn't clearly match menopause/postmenopause, even when
+    # there wasn't enough completed-cycle history, wasn't an age-plausible
+    # range, or had no supporting symptom cluster - reporting a clinical stage
+    # the data couldn't support. Age-implausible cases fold into the existing
+    # "insufficient_data" value rather than introducing a new stage string,
+    # to keep the response's value space unchanged.
+    if months_since >= 60:
+        return "postmenopause", months_since
     elif 12 <= months_since < 60:
         return "menopause", months_since
-    elif months_since >= 60:
-        return "postmenopause", months_since
-    else:
+    elif (
+        months_since < 12
+        and not age_implausible
+        and has_enough_data_for_regularity
+        and is_irregular
+        and has_symptom_cluster
+    ):
         return "perimenopause", months_since
+    elif (
+        months_since < 12
+        and not age_implausible
+        and has_enough_data_for_regularity
+        and not is_irregular
+    ):
+        return "regular_cycles", months_since
+    else:
+        return "insufficient_data", months_since
 
 
 def _determine_cycle_status(cycles: list) -> str:
@@ -609,7 +1455,13 @@ def _determine_cycle_status(cycles: list) -> str:
 
 
 def _extract_top_symptoms(health_logs: list, limit: int = 5) -> List[str]:
-    """Extract most common symptoms from health logs."""
+    """Extract most common symptoms from health logs.
+
+    Returns symptom keys only (e.g. "cramps", "hot_flashes") - this feeds
+    user/doctor-facing fields (MenopauseSummary.primary_symptoms,
+    ClinicalExport.primary_symptoms), so mood/energy tracking must not leak
+    into the output as raw values like "mood_🙂".
+    """
     symptom_counts = defaultdict(int)
     
     for log in health_logs:
@@ -619,14 +1471,6 @@ def _extract_top_symptoms(health_logs: list, limit: int = 5) -> List[str]:
         for symptom, value in symptoms.items():
             if value and value != "none" and symptom not in ["notes", "sleep_hours", "sleep_quality"]:
                 symptom_counts[symptom] += 1
-    
-    # Also count mood and energy
-    for log in health_logs:
-        if log.get("mood"):
-            mood_key = f"mood_{log.get('mood')}"
-            symptom_counts["mood_changes"] += 1
-        if log.get("energy_level"):
-            symptom_counts["low_energy"] += 1
     
     # Sort and return top
     sorted_symptoms = sorted(symptom_counts.items(), key=lambda x: x[1], reverse=True)
@@ -676,8 +1520,12 @@ def _get_recommendations(menopause_stage: str, symptoms: List[str]) -> List[str]
     
     if menopause_stage == "perimenopause":
         recs.append("Track cycles and symptoms to monitor progression")
-    else:
+    elif menopause_stage in ("menopause", "postmenopause"):
         recs.append("Focus on long-term bone and cardiovascular health")
+    elif menopause_stage == "insufficient_data":
+        recs.append("Continue logging cycles to build a clearer picture of your stage")
+    else:
+        recs.append("Continue tracking your cycle to monitor for changes")
     
     return recs[:3]
 
@@ -823,9 +1671,10 @@ def _build_symptom_matrix(
     health_logs: list,
     period: str,
     start_date: date,
-    end_date: date
+    end_date: date,
+    terra_data: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """Build symptom matrix from health logs."""
+    """Build symptom matrix from health logs + Terra wearable data."""
     symptom_frequency = defaultdict(int)
     symptom_severity = defaultdict(lambda: defaultdict(int))
     entries = []
@@ -846,17 +1695,20 @@ def _build_symptom_matrix(
                 if isinstance(value, str):
                     symptom_severity[symptom][value] += 1
         
-        # Set entry fields
-        entry.hot_flash = symptoms.get("hot_flash")
+        # Set entry fields.
+        # _normalize_symptoms() keys are derived from the exact logged text
+        # (e.g. "Hot flashes" -> "hot_flashes", "Headache" -> "headache"), so
+        # these must match that output rather than assumed singular/plural forms.
+        entry.hot_flash = symptoms.get("hot_flashes") or symptoms.get("hot_flash")
         entry.hot_flash_count = symptoms.get("hot_flash_count")
-        entry.night_sweat = symptoms.get("night_sweat")
+        entry.night_sweat = symptoms.get("night_sweats") or symptoms.get("night_sweat")
         entry.sleep_disruption = "moderate" if symptoms.get("sleep_hours", 8) < 6 else "none"
         entry.sleep_hours = symptoms.get("sleep_hours")
         entry.brain_fog = symptoms.get("brain_fog")
         entry.joint_pain = symptoms.get("joint_pain")
         entry.vaginal_dryness = symptoms.get("vaginal_dryness")
         entry.weight_change_lbs = symptoms.get("weight_change_lbs")
-        entry.headaches = symptoms.get("headaches")
+        entry.headaches = symptoms.get("headache") or symptoms.get("headaches")
         entry.fatigue = symptoms.get("fatigue")
         
         entries.append(entry.model_dump())
@@ -876,11 +1728,11 @@ def _build_symptom_matrix(
     # Extract correlations
     correlations = _calculate_symptom_correlations(health_logs)
     
-    # Calculate mood stability
+    # Calculate mood stability (mood is stored as emoji, not English words)
     moods = []
     for log in health_logs:
         if log.get("mood"):
-            mood_score = {"happy": 8, "neutral": 5, "sad": 2, "anxious": 3, "irritable": 2}.get(log.get("mood"), 5)
+            mood_score = MOOD_EMOJI_SCORES.get(log.get("mood"), 5)
             moods.append(mood_score)
     mood_stability = int((sum(moods) / len(moods) / 10 * 100)) if moods else 50
     
@@ -889,14 +1741,25 @@ def _build_symptom_matrix(
     energy_scores = [energy_map.get(log.get("energy_level"), 50) for log in health_logs if log.get("energy_level")]
     avg_energy = int(sum(energy_scores) / len(energy_scores)) if energy_scores else 50
     
-    # Calculate sleep
-    sleep_hours = []
-    for log in health_logs:
-        symptoms = _normalize_symptoms(log.get("symptoms"))
-        
-        if symptoms.get("sleep_hours"):
-            sleep_hours.append(symptoms.get("sleep_hours"))
-    avg_sleep = sum(sleep_hours) / len(sleep_hours) if sleep_hours else 7
+    # Calculate sleep - prefer Terra wearable data, fallback to health_logs
+    avg_sleep = None
+    
+    # First try Terra data (wearable)
+    if terra_data and terra_data.get("has_data") and terra_data.get("avg_sleep_hours") is not None:
+        avg_sleep = terra_data["avg_sleep_hours"]
+    
+    # Fallback to health_logs if no Terra data
+    if avg_sleep is None:
+        sleep_hours = []
+        for log in health_logs:
+            symptoms = _normalize_symptoms(log.get("symptoms"))
+            if symptoms.get("sleep_hours"):
+                sleep_hours.append(symptoms.get("sleep_hours"))
+        avg_sleep = sum(sleep_hours) / len(sleep_hours) if sleep_hours else None
+    
+    # Only use default if no data from any source
+    if avg_sleep is None:
+        avg_sleep = 7  # default fallback
     
     return {
         "period": period,
@@ -972,6 +1835,68 @@ def _calculate_gsm_health(health_logs: list) -> Dict[str, Dict]:
     return gsm_health
 
 
+def _generate_correlation_descriptions_llm(correlations: List[Dict]) -> List[Dict]:
+    """
+    Use LLM to generate personalized, insightful descriptions for symptom correlations.
+    Falls back to static descriptions if LLM fails.
+    """
+    if not correlations:
+        return correlations
+    
+    try:
+        from ai.utils.llm_call import llm_call
+        
+        # Build correlation summary for LLM
+        correlation_summary = "\n".join([
+            f"- {c['from']} ↔ {c['to']}: {c['percentage']}% co-occurrence"
+            for c in correlations
+        ])
+        
+        prompt = f"""You are a perimenopause health insights assistant. Generate short, helpful descriptions for these symptom correlations.
+
+Correlations found in user's health logs:
+{correlation_summary}
+
+For each correlation, write a brief 1-line description (max 15 words) explaining:
+- What this pattern might mean for the user
+- Use empathetic, supportive tone
+- Focus on perimenopause context
+
+Return ONLY a valid JSON array with this exact structure (no markdown, no extra text):
+[
+  {{"from": "Symptom1", "to": "Symptom2", "description": "Your brief insight here."}}
+]
+
+Important: Return descriptions for ALL {len(correlations)} correlations in the same order."""
+
+        response = llm_call(prompt, max_tokens=500, temperature=0.7)
+        
+        # Parse LLM response
+        # Handle potential markdown code blocks
+        response = response.strip()
+        if response.startswith("```"):
+            response = response.split("```")[1]
+            if response.startswith("json"):
+                response = response[4:]
+        response = response.strip()
+        
+        llm_descriptions = json.loads(response)
+        
+        # Update correlations with LLM descriptions
+        if isinstance(llm_descriptions, list) and len(llm_descriptions) == len(correlations):
+            for i, desc_item in enumerate(llm_descriptions):
+                if isinstance(desc_item, dict) and "description" in desc_item:
+                    correlations[i]["description"] = desc_item["description"]
+        
+        return correlations
+        
+    except Exception as e:
+        # Fallback: keep existing static descriptions
+        import logging
+        logging.warning(f"LLM correlation description failed, using static: {e}")
+        return correlations
+
+
 def _calculate_symptom_correlations(health_logs: list) -> List[Dict]:
     """Calculate symptom correlations with percentages and descriptions."""
     from collections import defaultdict
@@ -985,26 +1910,40 @@ def _calculate_symptom_correlations(health_logs: list) -> List[Dict]:
         if log.get("mood"):
             symptoms_present.append("mood")
         
+        # energy_level is a separate health_logs column, not part of the symptoms
+        # JSON, but is still a trackable per-day signal for correlations
+        if log.get("energy_level"):
+            symptoms_present.append("energy_level")
+        
         symptoms = _normalize_symptoms(log.get("symptoms"))
         
         for symptom, value in symptoms.items():
             if value and value not in ["none", "None", 0]:
                 symptoms_present.append(symptom)
         
+        # Sleep disruption is inferred, not a literal symptom key, so add it
+        # separately when sleep_hours indicates disrupted sleep
+        if symptoms.get("sleep_hours") is not None and symptoms.get("sleep_hours") < 6:
+            symptoms_present.append("sleep_disruption")
+        
         # Track co-occurrences
         for i, s1 in enumerate(symptoms_present):
             for s2 in symptoms_present[i+1:]:
                 co_occurrences[s1][s2] += 1
     
-    # Format as correlation list with percentages
+    # Format as correlation list with percentages.
+    # Keys must match the snake_case keys _normalize_symptoms() actually produces
+    # from logged symptom text (e.g. "Hot flashes" -> "hot_flashes", plural "s"
+    # included) - the previous singular keys here never matched real data.
     correlations = []
     
+    # Static fallback descriptions (used if LLM fails)
     correlation_descriptions = {
-        ("hot_flash", "sleep_disruption"): "Hot flash episodes after 10pm directly correlate with {pct}% reduction in deep sleep duration.",
-        ("sleep_disruption", "mood"): "Under 6hrs sleep raises irritability and anxiety scores by {pct}% the following day.",
-        ("hot_flash", "mood"): "Days with 5+ episodes show elevated mood disruption in {pct}% of logged entries.",
-        ("night_sweat", "sleep_disruption"): "Night sweats interrupt REM cycle with {pct}% sleep quality reduction.",
-        ("vaginal_dryness", "libido"): "Vaginal dryness correlates with {pct}% reported libido impact.",
+        ("hot_flashes", "sleep_disruption"): "Hot flash episodes directly correlate with {pct}% reduction in deep sleep duration.",
+        ("sleep_disruption", "mood"): "Sleep disruption raises irritability and mood changes in {pct}% of logged entries.",
+        ("hot_flashes", "mood"): "Days with hot flashes show elevated mood disruption in {pct}% of logged entries.",
+        ("night_sweats", "sleep_disruption"): "Night sweats interrupt sleep with {pct}% co-occurrence with sleep disruption.",
+        ("vaginal_dryness", "libido_impact"): "Vaginal dryness correlates with {pct}% reported libido impact.",
         ("fatigue", "energy_level"): "High fatigue scores correspond to {pct}% energy level reduction."
     }
     
@@ -1013,7 +1952,7 @@ def _calculate_symptom_correlations(health_logs: list) -> List[Dict]:
             if count > 0:
                 percentage = int((count / total_days) * 100) if total_days > 0 else 0
                 
-                # Find description
+                # Find static description as fallback
                 desc = None
                 for (s1, s2), desc_template in correlation_descriptions.items():
                     if (symptom1 == s1 and symptom2 == s2) or (symptom1 == s2 and symptom2 == s1):
@@ -1032,5 +1971,8 @@ def _calculate_symptom_correlations(health_logs: list) -> List[Dict]:
     
     # Sort by percentage descending and return top correlations
     correlations = sorted(correlations, key=lambda x: x["percentage"], reverse=True)[:5]
+    
+    # Generate LLM-based descriptions (replaces static if successful)
+    correlations = _generate_correlation_descriptions_llm(correlations)
     
     return correlations

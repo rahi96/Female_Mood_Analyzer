@@ -381,15 +381,24 @@ POSTPARTUM_ACTIVITIES = {
 def pregnancy_summary(user_id: int) -> Dict[str, Any]:
     """Get pregnancy summary for user (or postpartum if already delivered)."""
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey
         
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Check if user exists
+        # Gate on the Pregnancy & Postpartum journey being active for this user -
+        # profiles.life_stage_id and row-presence in user_pregnancies/postpartum_recoveries
+        # are not sufficient on their own (a user can have orphaned rows from a
+        # deactivated journey, or be on multiple simultaneous journeys).
+        journey = get_active_journey(user_id, "Pregnancy & Postpartum")
+        if not journey:
             profile = get_user_profile(user_id)
             if not profile:
                 raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+            raise HTTPException(
+                status_code=404,
+                detail=f"User {user_id} does not have an active Pregnancy & Postpartum journey."
+            )
+        
+        with get_connection() as conn:
+            cursor = conn.cursor()
             
             # PRIORITY 1: Check if user has postpartum data (already delivered)
             cursor.execute("""
@@ -413,20 +422,12 @@ def pregnancy_summary(user_id: int) -> Dict[str, Any]:
                     "pregnancy_completed": True,
                     "delivery_completed": True,
                     "delivery_date": delivery_date.isoformat() if delivery_date else None,
+                    "profile_id": journey["profile_id"],
+                    "journey_id": journey["journey_id"],
+                    "journey_title": journey["journey_title"],
                     "message": "Pregnancy delivery completed. Use /api/v1/postpartum/recovery endpoint for postpartum recovery details.",
                     "redirect_to": "/api/v1/postpartum/recovery"
                 }
-            
-            # PRIORITY 2: Check if user is in pregnancy life stage OR has active pregnancy data
-            # This allows users to access pregnancy data even if life_stage_id hasn't been updated
-            is_pregnant_stage = profile.get("life_stage_id") == 3
-            has_pregnancy_data = _has_pregnancy_data(user_id)
-            
-            if not (is_pregnant_stage or has_pregnancy_data):
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"User {user_id} is not currently pregnant. No active pregnancy cycle found."
-                )
             
             # Try to get active pregnancy from user_pregnancies table (NEW)
             cursor.execute("""
@@ -452,13 +453,25 @@ def pregnancy_summary(user_id: int) -> Dict[str, Any]:
                 pregnancy = cursor.fetchone()
             
             if not pregnancy:
-                return {"is_pregnant": False, "message": "No active pregnancy found"}
+                return {
+                    "is_pregnant": False,
+                    "message": "No active pregnancy found",
+                    "profile_id": journey["profile_id"],
+                    "journey_id": journey["journey_id"],
+                    "journey_title": journey["journey_title"],
+                }
             
             # Use LMP date or conception date to calculate pregnancy start
             pregnancy_start = pregnancy.get("last_menstrual_period_date") or pregnancy.get("conception_date")
             
             if not pregnancy_start:
-                return {"is_pregnant": False, "message": "No pregnancy start date found"}
+                return {
+                    "is_pregnant": False,
+                    "message": "No pregnancy start date found",
+                    "profile_id": journey["profile_id"],
+                    "journey_id": journey["journey_id"],
+                    "journey_title": journey["journey_title"],
+                }
             
             pregnancy_id = pregnancy.get("id")
             due_date = pregnancy.get("due_date")
@@ -605,8 +618,12 @@ def pregnancy_summary(user_id: int) -> Dict[str, Any]:
                 confirmation_message=status_info["confirmation_message"]
             ).model_dump(exclude_none=False)
             
-            # Add phase indicator
+            # Add phase indicator + journey identity for multi-journey correlation
             response["phase"] = "pregnancy"
+            response["profile_id"] = journey["profile_id"]
+            response["journey_id"] = journey["journey_id"]
+            response["journey_title"] = journey["journey_title"]
+            response["pregnancy_id"] = pregnancy_id
             return response
     
     except HTTPException:
@@ -619,21 +636,16 @@ def pregnancy_summary(user_id: int) -> Dict[str, Any]:
 def pregnancy_milestones(user_id: int, week: Optional[int] = None) -> Dict[str, Any]:
     """Get pregnancy milestones for specific week - UI-aligned narrative format."""
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey
         
-        # Check if user exists
-        profile = get_user_profile(user_id)
-        if not profile:
-            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-        
-        # Check if user is in pregnancy life stage OR has active pregnancy data
-        is_pregnant_stage = profile.get("life_stage_id") == 3
-        has_pregnancy_data = _has_pregnancy_data(user_id)
-        
-        if not (is_pregnant_stage or has_pregnancy_data):
+        journey = get_active_journey(user_id, "Pregnancy & Postpartum")
+        if not journey:
+            profile = get_user_profile(user_id)
+            if not profile:
+                raise HTTPException(status_code=404, detail=f"User {user_id} not found")
             raise HTTPException(
-                status_code=404, 
-                detail=f"User {user_id} is not currently pregnant. No active pregnancy cycle found."
+                status_code=404,
+                detail=f"User {user_id} does not have an active Pregnancy & Postpartum journey."
             )
         
         # Get current week if not specified
@@ -662,7 +674,7 @@ def pregnancy_milestones(user_id: int, week: Optional[int] = None) -> Dict[str, 
         # Get next 5 clinical tests (unified response)
         clinical_tests = _get_next_5_clinical_tests(week)
         
-        return PregnancyMilestones(
+        result = PregnancyMilestones(
             week=week,
             trimester=trimester,
             baby_development=data.get("baby", ""),
@@ -672,6 +684,10 @@ def pregnancy_milestones(user_id: int, week: Optional[int] = None) -> Dict[str, 
             clinical_monitoring=clinical_tests,
             clinical_warning_signs=data.get("warning_signs", "")
         ).model_dump(exclude_none=False)
+        result["profile_id"] = journey["profile_id"]
+        result["journey_id"] = journey["journey_id"]
+        result["journey_title"] = journey["journey_title"]
+        return result
     
     except HTTPException:
         raise  # Re-raise HTTPException to propagate to FastAPI
@@ -683,21 +699,16 @@ def pregnancy_milestones(user_id: int, week: Optional[int] = None) -> Dict[str, 
 def pregnancy_clinical_timeline(user_id: int, week: Optional[int] = None) -> Dict[str, Any]:
     """Get all clinical tests across entire pregnancy with dates - UI timeline view."""
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey
         
-        # Check if user exists
-        profile = get_user_profile(user_id)
-        if not profile:
-            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-        
-        # Check if user is in pregnancy life stage OR has active pregnancy data
-        is_pregnant_stage = profile.get("life_stage_id") == 3
-        has_pregnancy_data = _has_pregnancy_data(user_id)
-        
-        if not (is_pregnant_stage or has_pregnancy_data):
+        journey = get_active_journey(user_id, "Pregnancy & Postpartum")
+        if not journey:
+            profile = get_user_profile(user_id)
+            if not profile:
+                raise HTTPException(status_code=404, detail=f"User {user_id} not found")
             raise HTTPException(
-                status_code=404, 
-                detail=f"User {user_id} is not currently pregnant. No active pregnancy cycle found."
+                status_code=404,
+                detail=f"User {user_id} does not have an active Pregnancy & Postpartum journey."
             )
         
         # Get current week if not specified
@@ -731,7 +742,10 @@ def pregnancy_clinical_timeline(user_id: int, week: Optional[int] = None) -> Dic
             "week": week,
             "trimester": trimester,
             "clinical_monitoring": clinical_tests,
-            "clinical_warning_signs": warning_signs
+            "clinical_warning_signs": warning_signs,
+            "profile_id": journey["profile_id"],
+            "journey_id": journey["journey_id"],
+            "journey_title": journey["journey_title"],
         }
     
     except HTTPException:
@@ -744,26 +758,23 @@ def pregnancy_clinical_timeline(user_id: int, week: Optional[int] = None) -> Dic
 def postpartum_recovery(user_id: int) -> Dict[str, Any]:
     """Get postpartum recovery overview."""
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey
         
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Check if user exists
+        # Gate on the Pregnancy & Postpartum journey being active - row presence in
+        # postpartum_recoveries/menstrual_cycles alone is not sufficient (orphaned
+        # data from a deactivated journey must not be surfaced).
+        journey = get_active_journey(user_id, "Pregnancy & Postpartum")
+        if not journey:
             profile = get_user_profile(user_id)
             if not profile:
                 raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-            
-            # Check if user is in postpartum life stage OR has completed pregnancy data
-            # This allows users to access postpartum data even if life_stage_id hasn't been updated
-            is_postpartum_stage = profile.get("life_stage_id") == 4
-            has_postpartum_data = _has_postpartum_data(user_id)
-            
-            if not (is_postpartum_stage or has_postpartum_data):
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"User {user_id} is not postpartum. No completed pregnancy found."
-                )
+            raise HTTPException(
+                status_code=404,
+                detail=f"User {user_id} does not have an active Pregnancy & Postpartum journey."
+            )
+        
+        with get_connection() as conn:
+            cursor = conn.cursor()
             
             # Try to get postpartum data from NEW postpartum_recoveries table
             cursor.execute("""
@@ -777,31 +788,46 @@ def postpartum_recovery(user_id: int) -> Dict[str, Any]:
             """, (user_id,))
             postpartum_record = cursor.fetchone()
             
-            # Fallback to OLD menstrual_cycles table if not found
+            # Fallback chain: user_pregnancies (real delivery date, always written by the app)
+            # -> old menstrual_cycles table, if no postpartum_recoveries screening exists yet.
             if postpartum_record:
                 delivery_date = postpartum_record.get("delivery_date")
             else:
                 cursor.execute("""
-                    SELECT period_end_date as delivery_date
-                    FROM menstrual_cycles
-                    WHERE user_id = %s AND is_completed = 1
-                    ORDER BY period_end_date DESC
+                    SELECT delivery_date
+                    FROM user_pregnancies
+                    WHERE user_id = %s AND status = 'completed' AND delivery_date IS NOT NULL
+                    ORDER BY delivery_date DESC
                     LIMIT 1
                 """, (user_id,))
-                cycle = cursor.fetchone()
+                completed_pregnancy = cursor.fetchone()
+                
+                if not completed_pregnancy or not completed_pregnancy.get("delivery_date"):
+                    cursor.execute("""
+                        SELECT period_end_date as delivery_date
+                        FROM menstrual_cycles
+                        WHERE user_id = %s AND is_completed = 1
+                        ORDER BY period_end_date DESC
+                        LIMIT 1
+                    """, (user_id,))
+                    cycle = cursor.fetchone()
+                else:
+                    cycle = completed_pregnancy
                 
                 if not cycle or not cycle.get("delivery_date"):
+                    from ai.utils.db import get_all_active_journeys
                     return {
                         "days_postpartum": 0,
                         "postpartum_week": 0,
                         "recovery_status": "no_data",
-                        "delivery_method": "unknown",
-                        "physical_health": {"physical_recovery_percent": 0, "bleeding_level": "unknown", "pelvic_floor_status": "unknown", "hormonal_balance_percent": 0, "energy_level_percent": 0, "sleep_quality_percent": 0},
+                        "physical_health": {"physical_recovery_percent": None, "hormonal_balance_percent": None, "energy_level_percent": None, "sleep_quality_percent": None, "energy_data_source": "no_data", "sleep_data_source": "no_data", "recovery_data_source": "no_data", "hormonal_data_source": "no_data"},
                         "mental_health": {"mood_stability": 0, "anxiety_level": 0, "depression_screening": "unknown", "mood_trend": "unknown", "supportive_resources": []},
                         "activity_level": "Consult doctor",
                         "alerts": [],
                         "next_follow_up": None,
-                        "message": "No completed pregnancy found"
+                        "message": "No completed pregnancy found",
+                        "profile_id": journey["profile_id"],
+                        "journeys": get_all_active_journeys(user_id),
                     }
                 
                 delivery_date = cycle.get("delivery_date")
@@ -809,18 +835,20 @@ def postpartum_recovery(user_id: int) -> Dict[str, Any]:
             postpartum_week = (current_date - delivery_date).days // 7
             postpartum_week = max(0, min(12, postpartum_week))
             
-            # Fetch health logs for postpartum data
+            # Bound the window to this delivery's 12-week postpartum period so logs from a
+            # subsequent pregnancy/delivery can't leak into this journey's recovery metrics.
+            window_end = delivery_date + timedelta(weeks=12)
             cursor.execute("""
                 SELECT mood, energy_level, symptoms, notes, log_date
                 FROM health_logs
-                WHERE user_id = %s AND log_date >= %s
+                WHERE user_id = %s AND log_date >= %s AND log_date <= %s
                 ORDER BY log_date DESC
                 LIMIT 14
-            """, (user_id, delivery_date))
+            """, (user_id, delivery_date, window_end))
             health_logs = cursor.fetchall()
             
-            # Calculate recovery metrics from health logs
-            recovery_metrics = _calculate_recovery_metrics(health_logs, postpartum_week)
+            # Calculate recovery metrics, preferring the real stored screening record when present
+            recovery_metrics = _calculate_recovery_metrics(health_logs, postpartum_week, user_id, postpartum_record)
             mental_health = _calculate_mental_health(health_logs)
             alerts = _generate_postpartum_alerts(postpartum_week, recovery_metrics, mental_health)
             
@@ -853,13 +881,17 @@ def postpartum_recovery(user_id: int) -> Dict[str, Any]:
                 health_logs
             )
             
+            from ai.utils.db import get_all_active_journeys
+            all_journeys = get_all_active_journeys(user_id)
+
             return {
                 "phase": "postpartum",
+                "profile_id": journey["profile_id"],
+                "journeys": all_journeys,
                 "delivery_date": delivery_date.isoformat(),
                 "days_postpartum": days_postpartum,
                 "postpartum_week": postpartum_week,
                 "recovery_status": recovery_status,
-                "delivery_method": "vaginal",  # Would need separate table to track
                 "physical_health": recovery_metrics,
                 "mental_health": mental_health_dict,
                 "mental_health_ui": mental_health_ui
@@ -1130,13 +1162,6 @@ def _generate_postpartum_alerts(week: int, recovery: RecoveryMetrics, mental_hea
     """Generate postpartum alerts based on recovery status."""
     alerts = []
     
-    if recovery.bleeding_level == "heavy":
-        alerts.append(PostpartumAlert(
-            type="bleeding",
-            level="high",
-            message="Excessive bleeding detected. Contact doctor if more than 1 pad/hour"
-        ))
-    
     if mental_health.depression_screening == "moderate_risk":
         alerts.append(PostpartumAlert(
             type="mental_health",
@@ -1154,44 +1179,155 @@ def _generate_postpartum_alerts(week: int, recovery: RecoveryMetrics, mental_hea
     return alerts
 
 
-def _calculate_recovery_metrics(logs: list, postpartum_week: int) -> RecoveryMetrics:
-    """Calculate recovery metrics from health logs."""
-    # Estimate recovery based on week (20% baseline + 10% per week)
-    recovery_percent = min(100, 20 + (postpartum_week * 10))
+def _fetch_latest_terra_daily_payload(user_id: int) -> Optional[dict]:
+    """Fetch and parse the most recent 'daily' terra_activity_data payload for a user, or None if unavailable."""
+    try:
+        from ai.utils.db import get_connection
+        import json
+
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT payload
+                FROM terra_activity_data
+                WHERE user_id = %s AND type = 'daily'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (user_id,))
+            row = cursor.fetchone()
+            if not row or not row.get("payload"):
+                return None
+
+            payload = row["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            return payload
+    except Exception as e:
+        print(f"[WARNING] _fetch_latest_terra_daily_payload failed for user {user_id}: {e}")
+        return None
+
+
+def _fetch_wearable_sleep_score(user_id: int) -> Optional[int]:
+    """Derive a 0-100 sleep quality score from terra_activity_data, if the user has a connected wearable.
+
+    NOTE: payload.data[0].scores.sleep is actually hours slept (e.g. 7.5), not a 0-100 score,
+    despite the field name. We convert hours to a percentage against an 8-hour target.
+    """
+    payload = _fetch_latest_terra_daily_payload(user_id)
+    if not payload:
+        return None
+
+    hours = None
+    data_list = payload.get("data") or []
+    if data_list and isinstance(data_list[0], dict):
+        hours = data_list[0].get("scores", {}).get("sleep")
+    if hours is None:
+        hours = payload.get("sleep", {}).get("hours")
+    if hours is None:
+        return None
+
+    try:
+        hours = float(hours)
+    except (TypeError, ValueError):
+        return None
+
+    if hours <= 0 or hours > 14:
+        return None  # outside plausible human sleep range, don't let it skew metrics
+
+    # 8 hours = 100%, scaled linearly, capped at 100
+    return int(min(100, round((hours / 8.0) * 100)))
+
+
+def _fetch_wearable_energy_score(user_id: int) -> Optional[int]:
+    """Derive a 0-100 energy score from real wearable signals (steps + HRV + stress), if available.
+
+    Terra doesn't expose a direct "energy" metric, so we combine the signals that actually
+    correlate with it: daily step count (activity), HRV status (physiological readiness),
+    and stress level (inverse contributor).
+    """
+    payload = _fetch_latest_terra_daily_payload(user_id)
+    if not payload:
+        return None
+
+    components = []
+
+    steps = payload.get("steps")
+    if isinstance(steps, (int, float)) and steps >= 0:
+        # 8000 steps/day = 100%, capped
+        components.append(min(100, (steps / 8000.0) * 100))
+
+    hrv_status = (payload.get("hrv") or {}).get("status", "")
+    hrv_score_map = {"low": 30, "normal": 70, "high": 90}
+    if hrv_status and hrv_status.strip().lower() in hrv_score_map:
+        components.append(hrv_score_map[hrv_status.strip().lower()])
+
+    stress_status = (payload.get("stress") or {}).get("status", "")
+    stress_score_map = {"low": 90, "moderate": 60, "high": 30}
+    if stress_status and stress_status.strip().lower() in stress_score_map:
+        components.append(stress_score_map[stress_status.strip().lower()])
+
+    if not components:
+        return None
+
+    return int(round(sum(components) / len(components)))
+
+
+def _calculate_recovery_metrics(
+    logs: list,
+    postpartum_week: int,
+    user_id: Optional[int] = None,
+    stored_record: Optional[dict] = None,
+) -> RecoveryMetrics:
+    """Calculate recovery metrics, preferring real stored/wearable data over week-based formulas.
+
+    stored_record: a row from postpartum_recoveries (clinician/screening-entered), if available -
+    its physical_recovery_percent / hormonal_balance_percent are real per-user values and take
+    priority over the week-based estimate below.
+    """
+    stored_record = stored_record or {}
+
+    # Physical recovery & hormonal balance require a clinical/screening entry - no wearable
+    # measures these. Report null (not a week-based guess) until a real screening exists.
+    recovery_percent = stored_record.get("physical_recovery_percent")
+    recovery_data_source = "screening" if recovery_percent is not None else "no_data"
+
+    hormonal_balance = stored_record.get("hormonal_balance_percent")
+    hormonal_data_source = "screening" if hormonal_balance is not None else "no_data"
     
-    # Calculate hormonal balance (improves over time)
-    # Week 0-2: 30%, Week 3-6: 50%, Week 7-12: 75%+
-    if postpartum_week < 3:
-        hormonal_balance = 30
-    elif postpartum_week < 7:
-        hormonal_balance = 50 + (postpartum_week - 3) * 3
-    else:
-        hormonal_balance = min(100, 75 + (postpartum_week - 7) * 3)
-    
-    # Parse energy from logs and convert to percentage
-    avg_energy_percent = 40  # Default for week 0
-    if logs:
+    # Energy: real wearable signals (steps/HRV/stress) first, then manual health_logs entries.
+    # No formula guess - if neither source exists, report null rather than a fabricated number.
+    avg_energy_percent: Optional[int] = None
+    energy_data_source = "no_data"
+
+    wearable_energy = _fetch_wearable_energy_score(user_id) if user_id else None
+    if wearable_energy is not None:
+        avg_energy_percent = max(0, min(100, wearable_energy))
+        energy_data_source = "wearable"
+    elif logs:
         energy_mapping = {"Very Low": 10, "Low": 30, "Moderate": 50, "High": 70, "Very High": 90}
         energies = [energy_mapping.get(log.get("energy_level"), 50) for log in logs if log.get("energy_level")]
         if energies:
             avg_energy_percent = int(sum(energies) / len(energies))
-        else:
-            # Estimate based on postpartum week
-            avg_energy_percent = min(90, 40 + (postpartum_week * 5))
-    else:
-        # Default estimate by week
-        avg_energy_percent = min(90, 40 + (postpartum_week * 5))
-    
-    # Calculate sleep quality percentage (4.5 hours = 45%, 8 hours = 100%)
-    sleep_quality_percent = min(100, 45 + (postpartum_week * 5))
+            energy_data_source = "health_log"
+
+    # Sleep: real wearable data only. No formula guess if unavailable.
+    sleep_quality_percent: Optional[int] = None
+    sleep_data_source = "no_data"
+
+    wearable_sleep = _fetch_wearable_sleep_score(user_id) if user_id else None
+    if wearable_sleep is not None:
+        sleep_quality_percent = max(0, min(100, wearable_sleep))
+        sleep_data_source = "wearable"
     
     return RecoveryMetrics(
-        physical_recovery_percent=int(recovery_percent),
-        bleeding_level="light" if postpartum_week > 2 else "moderate",
-        pelvic_floor_status="healing" if postpartum_week < 6 else "recovered",
-        hormonal_balance_percent=int(hormonal_balance),
+        physical_recovery_percent=int(recovery_percent) if recovery_percent is not None else None,
+        hormonal_balance_percent=int(hormonal_balance) if hormonal_balance is not None else None,
         energy_level_percent=avg_energy_percent,
-        sleep_quality_percent=int(sleep_quality_percent)
+        sleep_quality_percent=sleep_quality_percent,
+        energy_data_source=energy_data_source,
+        sleep_data_source=sleep_data_source,
+        recovery_data_source=recovery_data_source,
+        hormonal_data_source=hormonal_data_source
     )
 
 
@@ -1445,11 +1581,17 @@ def _determine_user_phase(user_id: int) -> tuple[str, dict]:
     Uses existing helper functions for consistency.
     """
     try:
-        from ai.utils.db import get_connection, get_user_profile
+        from ai.utils.db import get_connection, get_user_profile, get_active_journey
         
         profile = get_user_profile(user_id)
         if not profile:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+        
+        # Gate on the Pregnancy & Postpartum journey being active - without this,
+        # orphaned rows in postpartum_recoveries/user_pregnancies from a deactivated
+        # or never-linked journey get surfaced as if the journey were live.
+        if not get_active_journey(user_id, "Pregnancy & Postpartum"):
+            return ("unknown", {})
         
         with get_connection() as conn:
             cursor = conn.cursor()
@@ -1472,7 +1614,25 @@ def _determine_user_phase(user_id: int) -> tuple[str, dict]:
                 print(f"[PHASE_DEBUG] FOUND in postpartum_recoveries, returning postpartum")
                 return ("postpartum", postpartum)
             
-            # PRIORITY 1B: Fallback to menstrual_cycles (OLD TABLE) for completed pregnancies
+            # PRIORITY 1B: Check user_pregnancies directly for a completed delivery.
+            # A real user who just entered her delivery date lands here even before any
+            # postpartum_recoveries row exists (that table is only ever seeded manually/by
+            # a separate screening flow, never created automatically on delivery).
+            cursor.execute("""
+                SELECT delivery_date, NULL as current_week
+                FROM user_pregnancies
+                WHERE user_id = %s AND status = 'completed' AND delivery_date IS NOT NULL
+                ORDER BY delivery_date DESC
+                LIMIT 1
+            """, (user_id,))
+            postpartum_from_pregnancy = cursor.fetchone()
+            print(f"[PHASE_DEBUG] user_pregnancies (completed) check: {postpartum_from_pregnancy}")
+            
+            if postpartum_from_pregnancy:
+                print(f"[PHASE_DEBUG] FOUND completed delivery in user_pregnancies, returning postpartum")
+                return ("postpartum", postpartum_from_pregnancy)
+            
+            # PRIORITY 1C: Fallback to menstrual_cycles (OLD TABLE) for completed pregnancies
             cursor.execute("""
                 SELECT period_end_date as delivery_date, NULL as current_week
                 FROM menstrual_cycles
@@ -1544,6 +1704,21 @@ def _determine_user_phase(user_id: int) -> tuple[str, dict]:
         return ("unknown", {"error": str(e)})
 
 
+def _daily_freshness_instruction() -> str:
+    """Prompt prefix that pushes Claude to vary phrasing/angle day-to-day for
+    the same underlying context (week/stage), instead of the near-identical
+    wording a fixed prompt produces on every call. Paired with a higher
+    temperature in llm_call for actual output variety, not just instruction.
+    """
+    today = datetime.now().strftime("%A, %B %d, %Y")
+    return (
+        f"Today is {today}. Write a FRESH take for today - vary your wording, "
+        f"tone, and which specific detail you highlight compared to a typical "
+        f"response on this same topic. Don't just reword the same angle; pick "
+        f"a different specific detail, sensation, or framing to lead with today.\n\n"
+    )
+
+
 def _generate_pregnancy_insights(pregnancy_data: dict, current_week: int, user_id: int) -> list:
     """Generate AI-POWERED pregnancy insights using Claude.
     
@@ -1574,16 +1749,15 @@ def _generate_pregnancy_insights(pregnancy_data: dict, current_week: int, user_i
             baby_info = weekly_guide.get('baby_development', '') if weekly_guide else ''
             body_info = weekly_guide.get('your_body', '') if weekly_guide else ''
             
-            dev_prompt = f"""Generate ONE personalized baby development insight for week {current_week} of pregnancy:
+            dev_prompt = _daily_freshness_instruction() + f"""Generate ONE personalized baby development insight for week {current_week} of pregnancy:
 
 Baby development info: {baby_info if baby_info else 'Use general knowledge of week ' + str(current_week) + ' development'}
 Mother's body changes: {body_info if body_info else 'Use general knowledge of week ' + str(current_week) + ' changes'}
 
-Create a brief, empowering insight (2-3 sentences) about what's happening with baby and mother this week.
-Make it personal, warm, and exciting. Mention specific pregnancy milestones if you know them for this week.
-Format: Just the insight text, no labels."""
+Write ONE punchy, specific sentence (max 25 words) that opens with a vivid, surprising detail about baby or body this week - no generic filler, no "you're doing great" openers.
+Format: Just the sentence, no labels."""
             
-            dev_content = llm_call(dev_prompt, max_tokens=200)
+            dev_content = llm_call(dev_prompt, max_tokens=80, temperature=0.9)
             
             insights.append({
                 "type": "baby_development",
@@ -1598,16 +1772,15 @@ Format: Just the insight text, no labels."""
             nutrition_info = weekly_guide.get('nutrition_focus', '') if weekly_guide else ''
             exercise_info = weekly_guide.get('safe_exercise', '') if weekly_guide else ''
             
-            care_prompt = f"""Generate ONE pregnancy wellness insight for week {current_week}:
+            care_prompt = _daily_freshness_instruction() + f"""Generate ONE pregnancy wellness insight for week {current_week}:
 
 Nutrition focus: {nutrition_info if nutrition_info else 'Use general pregnancy nutrition knowledge for this week'}
 Safe exercises: {exercise_info if exercise_info else 'Use general pregnancy exercise knowledge for this week'}
 
-Create brief guidance (2-3 sentences) about nutrition and safe activity this week.
-Be practical and encouraging.
-Format: Just the insight text, no labels."""
+Write ONE punchy, specific sentence (max 25 words) with one concrete, actionable tip for this week - no generic filler.
+Format: Just the sentence, no labels."""
             
-            care_content = llm_call(care_prompt, max_tokens=200)
+            care_content = llm_call(care_prompt, max_tokens=80, temperature=0.9)
             
             insights.append({
                 "type": "care_timeline",
@@ -1631,17 +1804,16 @@ Format: Just the insight text, no labels."""
             if recent_logs:
                 symptoms_list = [log.get("symptoms") for log in recent_logs if log.get("symptoms")]
                 
-                warning_prompt = f"""Analyze her recent pregnancy symptoms and generate ONE clinical insight:
+                warning_prompt = _daily_freshness_instruction() + f"""Analyze her recent pregnancy symptoms and generate ONE clinical insight:
 
 Week: {current_week}
 Recent symptoms: {', '.join(symptoms_list[-5:]) if symptoms_list else 'None reported'}
 
 Identify any concerning symptoms (severe bleeding, severe pain, fever, etc.).
-Generate insight (2-3 sentences): normalize common pregnancy symptoms, flag severe ones.
-If severe symptoms detected: strongly recommend contacting doctor.
-Format: Just the insight text, no labels."""
+Write ONE short sentence (max 25 words): normalize common symptoms, or flag severe ones with a clear call to contact her doctor.
+Format: Just the sentence, no labels."""
                 
-                warning_content = llm_call(warning_prompt, max_tokens=200)
+                warning_content = llm_call(warning_prompt, max_tokens=80, temperature=0.7)
                 
                 concerning = any(risk in str(symptoms_list).lower() for risk in ["bleeding", "severe pain", "fever"])
                 
@@ -1668,18 +1840,17 @@ Format: Just the insight text, no labels."""
                 mood_scores = [log.get("mood") for log in mood_logs if log.get("mood")]
                 mood_avg = sum(mood_scores) / len(mood_scores) if mood_scores else 50
                 
-                emotional_prompt = f"""Generate ONE empathetic emotional wellness insight for pregnancy week {current_week}:
+                emotional_prompt = _daily_freshness_instruction() + f"""Generate ONE empathetic emotional wellness insight for pregnancy week {current_week}:
 
 Trimester: {('First' if current_week < 13 else ('Second' if current_week < 27 else 'Third'))}
 Recent mood score average: {mood_avg:.0f}/100
 Pregnancy stage: {'Early' if current_week < 13 else ('Mid' if current_week < 27 else 'Final')}
 
-Create brief insight (2-3 sentences) validating her emotions.
-Acknowledge pregnancy-related mood changes and encourage self-care.
-If mood low (<40): suggest support resources.
-Format: Just the insight text, no labels."""
+Write ONE short, warm sentence (max 25 words) validating her emotions this week.
+If mood low (<40): gently suggest reaching out for support.
+Format: Just the sentence, no labels."""
                 
-                emotional_content = llm_call(emotional_prompt, max_tokens=200)
+                emotional_content = llm_call(emotional_prompt, max_tokens=80, temperature=0.9)
                 
                 insights.append({
                     "type": "emotional_support",
@@ -1730,12 +1901,31 @@ def _generate_postpartum_insights(postpartum_data: dict, postpartum_week: int, r
         with get_connection() as conn:
             cursor = conn.cursor()
             
-            # Gather real data for AI analysis
-            physical_recovery = postpartum_data.get("physical_recovery_percent", 0)
-            sleep_quality = postpartum_data.get("sleep_quality_percent", 0)
-            energy_level = postpartum_data.get("energy_levels_percent", 0)
-            mood_stability = postpartum_data.get("mood_stability", 0)
-            anxiety_level = postpartum_data.get("anxiety_level", 0)
+            # Gather real data for AI analysis. physical_recovery/sleep/energy may be None when
+            # no screening/wearable/logged data exists - render as "no data" rather than a fake number.
+            physical_recovery_raw = postpartum_data.get("physical_recovery_percent")
+            sleep_quality_raw = postpartum_data.get("sleep_quality_percent")
+            energy_level_raw = postpartum_data.get("energy_levels_percent") or postpartum_data.get("energy_level_percent")
+            physical_recovery = f"{physical_recovery_raw}%" if physical_recovery_raw is not None else "No clinical screening recorded yet"
+            sleep_quality = f"{sleep_quality_raw}%" if sleep_quality_raw is not None else "No data available (no wearable connected)"
+            energy_level = f"{energy_level_raw}%" if energy_level_raw is not None else "No data available (no wearable or logs)"
+
+            # mood_stability/anxiety_level are stored as text labels (e.g. "Stable", "Mild"),
+            # not numbers - map them to a 0-100 scale for threshold comparisons below.
+            mood_label_scores = {"unstable": 20, "fluctuating": 50, "stable": 80}
+            anxiety_label_scores = {"severe": 90, "moderate": 60, "mild": 25, "none": 5}
+
+            raw_mood = postpartum_data.get("mood_stability", 0)
+            raw_anxiety = postpartum_data.get("anxiety_level", 0)
+
+            mood_stability = (
+                mood_label_scores.get(raw_mood.strip().lower(), 50)
+                if isinstance(raw_mood, str) else (raw_mood or 0)
+            )
+            anxiety_level = (
+                anxiety_label_scores.get(raw_anxiety.strip().lower(), 50)
+                if isinstance(raw_anxiety, str) else (raw_anxiety or 0)
+            )
             
             # Fetch recent health logs for trend analysis
             cursor.execute("""
@@ -1757,20 +1947,19 @@ def _generate_postpartum_insights(postpartum_data: dict, postpartum_week: int, r
             
             # === RECOVERY PROGRESS: AI-generated ===
             try:
-                recovery_prompt = f"""Based on this postpartum recovery data, generate ONE empathetic and actionable recovery insight:
+                recovery_prompt = _daily_freshness_instruction() + f"""Based on this postpartum recovery data, generate ONE empathetic and actionable recovery insight:
 
 WEEK: {postpartum_week}
-Physical recovery: {physical_recovery}%
-Sleep quality: {sleep_quality}%
-Energy level: {energy_level}%
+Physical recovery: {physical_recovery}
+Sleep quality: {sleep_quality}
+Energy level: {energy_level}
 
 Recent symptoms: {', '.join(symptoms_data[-3:]) if symptoms_data else 'None reported'}
 
-Generate a brief, personalized insight (2-3 sentences) about her physical recovery progress.
-Focus on her specific metrics, acknowledge challenges, and give next steps.
-Format: Just the insight text, no labels."""
+Write ONE punchy sentence (max 25 words) reframing her specific recovery numbers with one concrete next step - no generic filler.
+Format: Just the sentence, no labels."""
                 
-                recovery_content = llm_call(recovery_prompt, max_tokens=200)
+                recovery_content = llm_call(recovery_prompt, max_tokens=80, temperature=0.9)
                 
                 insights.append({
                     "type": "recovery_progress",
@@ -1785,7 +1974,7 @@ Format: Just the insight text, no labels."""
             
             # === MENTAL HEALTH: AI-generated screening ===
             try:
-                mental_prompt = f"""Analyze her postpartum mental health and generate ONE supportive insight:
+                mental_prompt = _daily_freshness_instruction() + f"""Analyze her postpartum mental health and generate ONE supportive insight:
 
 WEEK: {postpartum_week}
 Mood stability score: {mood_stability}/100
@@ -1793,12 +1982,11 @@ Anxiety level: {anxiety_level}/100
 
 Recent mood entries: {mood_scores if mood_scores else 'No recent data'}
 
-Generate a brief, empathetic insight (2-3 sentences) about her mental wellness.
-If mood is low (<40) or anxiety high (>70): suggest professional support.
-If stable: validate her feelings and encourage self-care.
-Format: Just the insight text, no labels."""
+Write ONE short, empathetic sentence (max 25 words) about her mental wellness this week.
+If mood low (<40) or anxiety high (>70): suggest professional support.
+Format: Just the sentence, no labels."""
                 
-                mental_content = llm_call(mental_prompt, max_tokens=200)
+                mental_content = llm_call(mental_prompt, max_tokens=80, temperature=0.9)
                 
                 # Determine priority based on actual scores
                 mental_priority = "critical" if (mood_stability < 40 or anxiety_level > 70) else "high"
@@ -1818,18 +2006,16 @@ Format: Just the insight text, no labels."""
             # === CLINICAL WARNING ROUTING: AI analyzes symptoms ===
             try:
                 if symptoms_data:
-                    warning_prompt = f"""Analyze these postpartum symptoms and generate ONE clinical insight:
+                    warning_prompt = _daily_freshness_instruction() + f"""Analyze these postpartum symptoms and generate ONE clinical insight:
 
 WEEK: {postpartum_week}
 Recent symptoms: {', '.join(symptoms_data[-5:])}
 
 Identify any concerning symptoms (fever, heavy bleeding, severe pain, infection signs).
-Generate a brief insight (2-3 sentences) about whether she needs medical attention.
-If symptoms are severe: strongly recommend contacting doctor.
-If mild: normalize symptoms and suggest monitoring.
-Format: Just the insight text, no labels."""
+Write ONE short sentence (max 25 words): normalize mild symptoms, or clearly flag severe ones with a call to contact her doctor.
+Format: Just the sentence, no labels."""
                     
-                    warning_content = llm_call(warning_prompt, max_tokens=200)
+                    warning_content = llm_call(warning_prompt, max_tokens=80, temperature=0.7)
                     
                     # Check if symptoms are concerning
                     concerning = any(risk in str(symptoms_data).lower() for risk in ["fever", "infection", "heavy bleeding", "severe pain"])
@@ -1847,19 +2033,19 @@ Format: Just the insight text, no labels."""
             
             # === ACTIVITY & RECOVERY GUIDANCE: AI-personalized ===
             try:
-                activity_prompt = f"""Generate ONE personalized activity recommendation for postpartum recovery:
+                activity_prompt = _daily_freshness_instruction() + f"""Generate ONE personalized activity recommendation for postpartum recovery:
 
 WEEK: {postpartum_week}
-Physical recovery: {physical_recovery}%
-Energy level: {energy_level}%
-Sleep quality: {sleep_quality}%
+Physical recovery: {physical_recovery}
+Energy level: {energy_level}
+Sleep quality: {sleep_quality}
 
 Recommend safe activities based on her recovery stage and metrics.
 Early recovery (<20%): rest focus. Mid recovery (20-70%): gradual activity. Advanced (70%+): return to normal.
-Generate a brief insight (2-3 sentences) with specific activity suggestions.
-Format: Just the insight text, no labels."""
+Write ONE punchy sentence (max 25 words) with one specific, doable activity suggestion for today.
+Format: Just the sentence, no labels."""
                 
-                activity_content = llm_call(activity_prompt, max_tokens=200)
+                activity_content = llm_call(activity_prompt, max_tokens=80, temperature=0.9)
                 
                 insights.append({
                     "type": "activity_guidance",
@@ -1926,20 +2112,19 @@ def _generate_loss_insights(user_id: int, loss_data: dict) -> list:
             timeline_stage = "healing"
         
         # === PRIMARY GRIEF SUPPORT ===
-        grief_prompt = f"""Generate ONE deeply compassionate grief support message for someone {days_since} days after a pregnancy loss ({loss_type}):
+        grief_prompt = _daily_freshness_instruction() + f"""Generate ONE deeply compassionate grief support message for someone {days_since} days after a pregnancy loss ({loss_type}):
 
 Timeline stage: {timeline_stage} (immediate=0-7 days, acute=7-30 days, processing=30-90 days, healing=90+ days)
 
-Create a brief, empathetic message (3-4 sentences) that:
-- Validates her grief completely
-- Removes ANY guilt (emphasize she did nothing wrong)
-- Acknowledges her pain without minimizing
-- Never asks about baby details or clinical outcomes
-- Uses warm, human language
+Write 1-2 short sentences (max 40 words total) that:
+- Validate her grief completely
+- Remove ANY guilt (she did nothing wrong)
+- Never ask about baby details or clinical outcomes
+- Use warm, human language, no clinical tone
 
 Format: Just the message text, no labels."""
         
-        grief_content = llm_call(grief_prompt, max_tokens=250)
+        grief_content = llm_call(grief_prompt, max_tokens=100, temperature=0.9)
         
         insights.append({
             "type": "grief_support",
@@ -1951,17 +2136,17 @@ Format: Just the message text, no labels."""
         })
         
         # === HEALING GUIDANCE ===
-        healing_prompt = f"""Generate ONE healing guidance insight for stage '{timeline_stage}' of grief (after {loss_type}):
+        healing_prompt = _daily_freshness_instruction() + f"""Generate ONE healing guidance insight for stage '{timeline_stage}' of grief (after {loss_type}):
 
 If immediate/acute: Focus on immediate coping, feeling allowed, reaching out.
 If processing: Focus on grief not being linear, processing emotions, self-care.
 If healing: Focus on moving forward while honoring loss, future possibilities.
 
-Create brief guidance (3-4 sentences) with 1-2 specific coping strategies.
+Write 1-2 short sentences (max 40 words total) with one specific coping strategy.
 Never minimize her grief or push her to "move on."
 Format: Just the insight text, no labels."""
         
-        healing_content = llm_call(healing_prompt, max_tokens=250)
+        healing_content = llm_call(healing_prompt, max_tokens=100, temperature=0.9)
         
         insights.append({
             "type": "healing_guidance",
@@ -1973,17 +2158,12 @@ Format: Just the insight text, no labels."""
         })
         
         # === PHYSICAL RECOVERY ===
-        physical_prompt = f"""Generate ONE insight about physical care after pregnancy loss ({loss_type}):
+        physical_prompt = _daily_freshness_instruction() + f"""Generate ONE insight about physical care after pregnancy loss ({loss_type}):
 
-Create brief guidance (2-3 sentences) about:
-- Listening to her body
-- Medical follow-up importance  
-- Self-care (rest, nutrition)
-- Connecting body care to emotional healing
-
+Write ONE short sentence (max 30 words) connecting one physical self-care action to her emotional healing.
 Format: Just the insight text, no labels."""
         
-        physical_content = llm_call(physical_prompt, max_tokens=200)
+        physical_content = llm_call(physical_prompt, max_tokens=80, temperature=0.9)
         
         insights.append({
             "type": "physical_care",
@@ -1996,19 +2176,14 @@ Format: Just the insight text, no labels."""
         
         # === HOPE & FUTURE (stage-appropriate) ===
         if timeline_stage in ["processing", "healing"]:
-            hope_prompt = f"""Generate ONE hopeful insight about future after pregnancy loss:
+            hope_prompt = _daily_freshness_instruction() + f"""Generate ONE hopeful insight about future after pregnancy loss:
 
 Timeline: {timeline_stage} (processing=30-90 days, healing=90+ days)
 
-Create brief, gentle message (2-3 sentences) about:
-- This loss not defining her story
-- Future possibilities when ready
-- Her strength and resilience
-- Never pushing but encouraging hope
-
+Write ONE short, gentle sentence (max 30 words) affirming her strength and that this loss doesn't define her story.
 Format: Just the insight text, no labels."""
             
-            hope_content = llm_call(hope_prompt, max_tokens=200)
+            hope_content = llm_call(hope_prompt, max_tokens=80, temperature=0.9)
             
             insights.append({
                 "type": "hope_and_future",
@@ -2020,18 +2195,12 @@ Format: Just the insight text, no labels."""
             })
         
         # === RESOURCES & SUPPORT ===
-        resources_prompt = f"""Generate ONE message about grief support resources:
+        resources_prompt = _daily_freshness_instruction() + f"""Generate ONE message about grief support resources:
 
-Create brief resource guide (3-4 sentences) listing:
-- Hotlines/crisis support
-- Support groups for pregnancy loss
-- Counseling options
-- Online communities
-End with warm encouragement to reach out.
-
+Write 1-2 short sentences (max 40 words total) mentioning 2 concrete resource types (e.g. support groups, counseling, hotlines) and a warm encouragement to reach out.
 Format: Just the message text, no labels."""
         
-        resources_content = llm_call(resources_prompt, max_tokens=250)
+        resources_content = llm_call(resources_prompt, max_tokens=100, temperature=0.9)
         
         insights.append({
             "type": "loss_support_resources",
@@ -2071,7 +2240,7 @@ def support_insights(user_id: int) -> Dict[str, Any]:
     try:
         from ai.utils.db import get_connection, get_user_profile
         
-        # Determine user's phase
+        # Determine user's phase (already gates on the active journey internally)
         phase, phase_data = _determine_user_phase(user_id)
         
         if phase == "unknown":
@@ -2080,10 +2249,19 @@ def support_insights(user_id: int) -> Dict[str, Any]:
                 detail=f"User {user_id} is not currently in a tracked pregnancy or postpartum phase."
             )
         
+        from ai.utils.db import get_active_journey
+        journey = get_active_journey(user_id, "Pregnancy & Postpartum")
+        
         # Get current date for calculations
         current_date = date.today()
         insights = []
-        meta_data = {"user_id": user_id, "phase": phase}
+        meta_data = {
+            "user_id": user_id,
+            "phase": phase,
+            "profile_id": journey["profile_id"] if journey else None,
+            "journey_id": journey["journey_id"] if journey else None,
+            "journey_title": journey["journey_title"] if journey else None,
+        }
         
         # ===== PREGNANCY PHASE =====
         if phase == "pregnancy":
@@ -2143,7 +2321,7 @@ def support_insights(user_id: int) -> Dict[str, Any]:
                 """, (user_id, delivery_date))
                 health_logs = cursor.fetchall()
                 
-                recovery_metrics = _calculate_recovery_metrics(health_logs, postpartum_week)
+                recovery_metrics = _calculate_recovery_metrics(health_logs, postpartum_week, user_id, postpartum)
             
             insights = _generate_postpartum_insights(postpartum, postpartum_week, recovery_metrics.model_dump() if hasattr(recovery_metrics, 'model_dump') else recovery_metrics, user_id)
         

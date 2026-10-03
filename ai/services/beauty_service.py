@@ -8,7 +8,10 @@ from ai.models.beauty_models import (
     SleepSkinData, CyclePhases, Correlations, AIInsights, PhaseData
 )
 from ai.utils.claude_llm import ClaudeLLM
-from ai.utils.db import get_connection
+from ai.utils.db import get_connection, get_active_journey
+
+# Beauty & Radiance journey id in life_journeys - see get_active_journey usage below.
+BEAUTY_JOURNEY_TITLE = "Beauty & Radiance"
 
 
 BEAUTY_SYSTEM_PROMPT = """You are a beauty & skincare AI assistant for a women's wellness app.
@@ -81,66 +84,84 @@ def _extract_scan_findings(scan_data: dict[str, Any]) -> list[FindingItem]:
     elasticity = safe_score(scan_data.get('elasticity_score'))
     glow = safe_score(scan_data.get('glow_index'))
     
-    # Generate AI-powered finding descriptions
-    try:
-        from ai.utils.llm_call import llm_call
-        
-        prompt = f"""Analyze these skin metrics and provide brief, professional finding descriptions for each metric. 
-        Return ONLY a JSON object with 4 keys: "moisture_barrier", "pore_congestion", "inflammation_markers", "melanin_uniformity"
-        Each value should be a 1-sentence clinical description (20-40 words).
-        
-        Metrics:
-        - Hydration: {hydration}/100
-        - Pore Health: {pore}/100
-        - Redness: {redness}/100
-        - Texture: {texture}/100
-        - Elasticity: {elasticity}/100
-        - Glow: {glow}/100
-        
-        Return ONLY valid JSON, no markdown code blocks."""
-        
-        response = llm_call(prompt)
-        ai_descriptions = json.loads(response) if isinstance(response, str) else response
-    except Exception as e:
-        print(f"[DEBUG] AI findings generation failed: {e}")
-        ai_descriptions = {}
+    # Generate SHORT finding descriptions (hardcoded + score-based, optimized for speed)
+    # Map score ranges to descriptions (no nested dict lookup overhead)
+    def get_status_word(score: float | None) -> str:
+        if score is None:
+            return "Excellent"
+        if score >= 76:
+            return "Excellent"
+        elif score >= 51:
+            return "Good"
+        elif score >= 26:
+            return "Moderate"
+        else:
+            return "Low"
     
-    # Moisture Barrier finding - AI generated
+    h_status = get_status_word(hydration)
+    p_status = get_status_word(pore)
+    r_status = get_status_word(redness)
+    t_status = get_status_word(texture)
+    
+    # Direct string mapping (O(1) lookup)
+    desc_map = {
+        ("hydration", "Excellent"): "Hydration optimal",
+        ("hydration", "Good"): "Hydration adequate",
+        ("hydration", "Moderate"): "Hydration moderate",
+        ("hydration", "Low"): "Hydration needs support",
+        ("pore", "Excellent"): "Pores clear",
+        ("pore", "Good"): "Pores healthy",
+        ("pore", "Moderate"): "Pore activity present",
+        ("pore", "Low"): "Pore congestion detected",
+        ("redness", "Excellent"): "Calm, minimal redness",
+        ("redness", "Good"): "Stable, low redness",
+        ("redness", "Moderate"): "Some inflammation present",
+        ("redness", "Low"): "Significant redness observed",
+        ("texture", "Excellent"): "Texture smooth, luminous",
+        ("texture", "Good"): "Texture even, glowing",
+        ("texture", "Moderate"): "Texture slightly uneven",
+        ("texture", "Low"): "Texture rough, dull",
+    }
+    
+    ai_descriptions = {
+        "moisture_barrier": desc_map.get(("hydration", h_status), "Hydration adequate"),
+        "pore_congestion": desc_map.get(("pore", p_status), "Pores healthy"),
+        "inflammation_markers": desc_map.get(("redness", r_status), "Stable, low redness"),
+        "melanin_uniformity": desc_map.get(("texture", t_status), "Texture even, glowing")
+    }
+    
+    # Moisture Barrier - Short description, no truncation needed
     if hydration is not None:
-        ai_status = ai_descriptions.get('moisture_barrier', f"Hydration level at {hydration}/100")
         findings.append(FindingItem(
             finding="Moisture barrier",
-            status=ai_status,
+            status=ai_descriptions.get('moisture_barrier', "Hydration adequate"),
             badge=score_to_badge(hydration),
             score=hydration
         ))
     
-    # Pore Health finding - AI generated
+    # Pore Health - Short description, no truncation needed
     if pore is not None:
-        ai_status = ai_descriptions.get('pore_congestion', f"Pore health at {pore}/100")
         findings.append(FindingItem(
             finding="Pore congestion",
-            status=ai_status,
+            status=ai_descriptions.get('pore_congestion', "Pore health good"),
             badge=score_to_badge(pore),
             score=pore
         ))
     
-    # Inflammation Markers finding - AI generated
+    # Inflammation Markers - Short description, no truncation needed
     if redness is not None:
-        ai_status = ai_descriptions.get('inflammation_markers', f"Redness level at {redness}/100")
         findings.append(FindingItem(
             finding="Inflammation markers",
-            status=ai_status,
+            status=ai_descriptions.get('inflammation_markers', "Redness stable"),
             badge=score_to_badge(redness),
             score=redness
         ))
     
-    # Melanin Uniformity finding - AI generated
+    # Melanin Uniformity - Short description, no truncation needed
     if texture is not None:
-        ai_status = ai_descriptions.get('melanin_uniformity', f"Texture uniformity at {texture}/100")
         findings.append(FindingItem(
             finding="Melanin uniformity",
-            status=ai_status,
+            status=ai_descriptions.get('melanin_uniformity', "Texture even"),
             badge=score_to_badge(texture),
             score=texture
         ))
@@ -282,9 +303,10 @@ Requirements:
 
 
 def _format_history_for_ui(history_scans: list[dict[str, Any]]) -> list[HistoryItem]:
-    """Format history scans for UI display with day_of_week and days_ago. Returns HistoryItem instances."""
+    """Format history scans for UI display with day_of_week and days_ago. Deduplicates by date, limits to 5."""
     formatted = []
     today = datetime.now()
+    seen_dates = set()  # Track unique dates
     
     for scan in history_scans:
         created_at = scan.get('created_at')
@@ -300,11 +322,18 @@ def _format_history_for_ui(history_scans: list[dict[str, Any]]) -> list[HistoryI
             created_at = created_at.replace(tzinfo=None)
         
         if created_at:
+            date_str = created_at.strftime('%Y-%m-%d')
+            
+            # Skip if we already have a scan for this date
+            if date_str in seen_dates:
+                continue
+            
+            seen_dates.add(date_str)
+            
             # Calculate days ago
             days_ago = (today - created_at).days
             
-            # Format date and day of week
-            date_str = created_at.strftime('%Y-%m-%d')
+            # Format day of week
             day_of_week = created_at.strftime('%A')
             
             formatted.append(HistoryItem(
@@ -314,6 +343,10 @@ def _format_history_for_ui(history_scans: list[dict[str, Any]]) -> list[HistoryI
                 days_ago=days_ago,
                 status_label=scan.get('status_label', 'Unknown')
             ))
+            
+            # Limit to 5 unique dates
+            if len(seen_dates) >= 5:
+                break
     
     return formatted  # Returns List[HistoryItem]
 
@@ -324,61 +357,99 @@ def _build_sleep_skin_chart(user_id: int, activity_data: dict[str, Any]) -> Slee
         with get_connection() as conn:
             cur = conn.cursor()
             
-            # Fetch last 7 days of skin scores
+            # Fetch both skin and sleep data in one query window for efficiency
+            # Get last 7 days of skin scores
             cur.execute("""
-                SELECT 
-                    DATE(created_at) as scan_date,
-                    AVG(overall_score) as avg_score
+                SELECT DATE(created_at) as scan_date, AVG(overall_score) as avg_score
                 FROM skin_scans
-                WHERE user_id = %s
-                AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-                GROUP BY DATE(created_at)
-                ORDER BY created_at ASC
+                WHERE user_id = %s AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                GROUP BY DATE(created_at) LIMIT 10
             """, (user_id,))
             
-            rows = cur.fetchall()
+            skin_rows = cur.fetchall()
             
-            # Build chart data for 7 days
+            # Convert skin rows to dict for O(1) lookup instead of looping
+            skin_by_date = {}
+            for row in skin_rows:
+                try:
+                    scan_date = row.get('scan_date')
+                    avg_score = row.get('avg_score')
+                    if scan_date:
+                        date_key = scan_date.strftime('%Y-%m-%d') if hasattr(scan_date, 'strftime') else str(scan_date)
+                        skin_by_date[date_key] = float(avg_score) if avg_score else None
+                except (TypeError, ValueError, AttributeError):
+                    pass
+            
+            # Get sleep data from terra_activity_data - extract from scores.sleep field
+            # Sleep data structure: {"data": [{"scores": {"sleep": 7.5}, ...}]}
+            cur.execute("""
+                SELECT DATE(created_at) as sleep_date, payload
+                FROM terra_activity_data
+                WHERE user_id = %s AND TRIM(type) = 'sleep' AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                LIMIT 50
+            """, (user_id,))
+            
+            sleep_rows = cur.fetchall()
+            
+            # Convert sleep rows to dict for O(1) lookup
+            sleep_by_date = {}
+            for row in sleep_rows:
+                try:
+                    sleep_date = row.get('sleep_date')
+                    payload = row.get('payload')
+                    
+                    if not sleep_date or not payload:
+                        continue
+                    
+                    # Parse JSON if needed
+                    if isinstance(payload, str):
+                        import json
+                        payload_dict = json.loads(payload)
+                    else:
+                        payload_dict = payload
+                    
+                    # Extract sleep hours from correct path: data[0]['scores']['sleep']
+                    sleep_hours = None
+                    
+                    if 'data' in payload_dict and isinstance(payload_dict['data'], list) and len(payload_dict['data']) > 0:
+                        first_data = payload_dict['data'][0]
+                        # Look for sleep in scores.sleep field
+                        if 'scores' in first_data and isinstance(first_data['scores'], dict):
+                            sleep_value = first_data['scores'].get('sleep')
+                            if sleep_value is not None:
+                                sleep_hours = float(sleep_value)
+                    
+                    # If no sleep hours found, skip this record
+                    if sleep_hours is None:
+                        continue
+                    
+                    date_key = sleep_date.strftime('%Y-%m-%d') if hasattr(sleep_date, 'strftime') else str(sleep_date)
+                    # Keep the highest value per date
+                    if date_key not in sleep_by_date or sleep_hours > sleep_by_date[date_key]:
+                        sleep_by_date[date_key] = round(sleep_hours, 1)
+                        
+                except (KeyError, TypeError, ValueError, AttributeError, IndexError, json.JSONDecodeError):
+                    # Silently skip records that can't be parsed
+                    pass
+            
+            # Build 7-day chart with single O(1) lookups
             chart_data = []
             today = datetime.now()
             
-            for i in range(6, -1, -1):  # Last 7 days
+            for i in range(6, -1, -1):
                 day_date = today - timedelta(days=i)
-                day_name = day_date.strftime('%a')  # Mon, Tue, etc.
                 date_str = day_date.strftime('%Y-%m-%d')
                 
-                # Find score for this date if exists
-                skin_score = None
-                for row in rows:
-                    try:
-                        row_date = row.get('scan_date')
-                        avg_score = row.get('avg_score')
-                        
-                        if isinstance(row_date, str):
-                            if date_str in row_date:
-                                skin_score = float(avg_score) if avg_score is not None else None
-                                break
-                        elif row_date and hasattr(row_date, 'strftime'):
-                            if row_date.strftime('%Y-%m-%d') == date_str:
-                                skin_score = float(avg_score) if avg_score is not None else None
-                                break
-                    except (TypeError, ValueError, AttributeError):
-                        continue
+                # Direct dict lookup instead of looping
+                skin_score = skin_by_date.get(date_str)
                 
-                # Only add to chart if we have actual data
+                # Only include days with skin data
                 if skin_score is not None:
-                    sleep_hours = activity_data.get('avg_sleep')
-                    if sleep_hours is not None:
-                        try:
-                            sleep_hours = float(sleep_hours)
-                        except (TypeError, ValueError):
-                            sleep_hours = None
-                    
                     chart_data.append({
-                        "day": day_name,
+                        "day": day_date.strftime('%a'),
                         "date": date_str,
                         "skin_score": int(skin_score),
-                        "sleep_hours": round(sleep_hours, 1) if sleep_hours else None
+                        "sleep_hours": sleep_by_date.get(date_str)
                     })
             
             # Only claim correlation if we have sufficient data points
@@ -423,6 +494,14 @@ def get_beauty_overview(request: BeautyRequest) -> BeautyResponse:
     try:
         user_id = request.user_id
         days = request.days or 30
+        
+        # Gate on the Beauty & Radiance journey being active for this user -
+        # previously this endpoint queried skin_scans/terra_activity_data by
+        # user_id alone, so orphaned/stale scan data would be returned even
+        # if the user isn't currently on the Beauty journey.
+        journey = get_active_journey(user_id, BEAUTY_JOURNEY_TITLE)
+        if not journey:
+            raise ValueError(f"User {user_id} does not have an active {BEAUTY_JOURNEY_TITLE} journey.")
         
         # Fetch skin scans data
         today_skin = _fetch_latest_skin_scan(user_id)
@@ -974,14 +1053,14 @@ def _calculate_cycle_phase_correlations(
 ) -> CyclePhases:
     """Calculate skin scores by menstrual cycle phase. Personalized per user's actual data."""
     
-    # If no skin data, return baseline defaults
+    # If no skin data, return baseline defaults with SHORT descriptions
     if not skin_data:
         return CyclePhases(
             phase_breakdown={
-                "menstrual": PhaseData(label="Menstrual (D1-5)", score=0, description="Increased inflammation & sensitivity"),
-                "follicular": PhaseData(label="Follicular (D6-13)", score=0, description="Rising estrogen boosts collagen & hydration"),
-                "ovulation": PhaseData(label="Ovulation (D14)", score=0, description="Peak glow & skin radiance"),
-                "luteal": PhaseData(label="Luteal (D15-28)", score=0, description="Progesterone causes texture issues"),
+                "menstrual": PhaseData(label="Menstrual (D1-5)", score=0, description="Sensitivity heightens"),
+                "follicular": PhaseData(label="Follicular (D6-13)", score=0, description="Hydration peaks"),
+                "ovulation": PhaseData(label="Ovulation (D14)", score=0, description="Glow at max"),
+                "luteal": PhaseData(label="Luteal (D15-28)", score=0, description="Texture changes"),
             },
             best_phase="ovulation",
             worst_phase="menstrual"
@@ -1004,13 +1083,13 @@ def _calculate_cycle_phase_correlations(
             
             cycles = cur.fetchall()
             if not cycles:
-                # No cycle data, return defaults with score 0
+                # No cycle data, return defaults with SHORT descriptions
                 return CyclePhases(
                     phase_breakdown={
-                        "menstrual": PhaseData(label="Menstrual (D1-5)", score=0, description="Increased inflammation & sensitivity"),
-                        "follicular": PhaseData(label="Follicular (D6-13)", score=0, description="Rising estrogen boosts collagen & hydration"),
-                        "ovulation": PhaseData(label="Ovulation (D14)", score=0, description="Peak glow & skin radiance"),
-                        "luteal": PhaseData(label="Luteal (D15-28)", score=0, description="Progesterone causes texture issues"),
+                        "menstrual": PhaseData(label="Menstrual (D1-5)", score=0, description="Sensitivity heightens"),
+                        "follicular": PhaseData(label="Follicular (D6-13)", score=0, description="Hydration peaks"),
+                        "ovulation": PhaseData(label="Ovulation (D14)", score=0, description="Glow at max"),
+                        "luteal": PhaseData(label="Luteal (D15-28)", score=0, description="Texture changes"),
                     },
                     best_phase="ovulation",
                     worst_phase="menstrual"

@@ -6,6 +6,41 @@ from datetime import date
 
 
 # ============================================================================
+# REPORT PREVIEW MODEL - Clean UI Summary (6 fields)
+# ============================================================================
+
+class ReportPreview(BaseModel):
+    """
+    Clean summary matching UI Report Preview - 6 personalized fields.
+    All fields are nullable to handle missing data gracefully.
+    """
+    stage: Optional[str] = Field(
+        None, 
+        description="Stage with duration e.g. 'Year 2 (confirmed)' or 'Perimenopause (tracking)'"
+    )
+    avg_hot_flashes: Optional[str] = Field(
+        None, 
+        description="Hot flash frequency e.g. '4.3/day (this month)'"
+    )
+    sleep_disruption: Optional[str] = Field(
+        None, 
+        description="Sleep disruption frequency e.g. '3.2 nights/week'"
+    )
+    mood_instability: Optional[str] = Field(
+        None, 
+        description="Mood stability level e.g. 'Mild', 'Mild–Moderate', 'Moderate–Severe'"
+    )
+    gsm_symptoms: Optional[str] = Field(
+        None, 
+        description="GSM summary e.g. 'Mild dryness & frequency'"
+    )
+    last_fsh_reading: Optional[str] = Field(
+        None, 
+        description="FSH with status e.g. '18.4 mIU/mL (elevated)'"
+    )
+
+
+# ============================================================================
 # VASOMOTOR TRACKER MODELS - Hot Flashes & Night Sweats
 # ============================================================================
 
@@ -185,7 +220,8 @@ class ClinicalExport(BaseModel):
     # Vasomotor Summary
     vasomotor_events_total: int
     vasomotor_avg_frequency_per_day: float
-    vasomotor_avg_severity: float = Field(..., ge=0, le=10)  # 0 = no events recorded
+    # 0 is a valid value (no vasomotor events logged in the period), not just 1-10
+    vasomotor_avg_severity: float = Field(..., ge=0, le=10)
     vasomotor_trend: str = Field(..., description="improving, stable, or worsening")
     vasomotor_primary_triggers: List[str] = Field(..., description="Top 3 identified triggers")
     
