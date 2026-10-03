@@ -14,3 +14,20 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 .puku/
+
+# One-off debug / diagnostic / inspection scripts (not part of the test suite)
+analyze_*.py
+check_*.py
+debug_*.py
+diagnose_*.py
+find_users_*.py
+pregnancy_users_*.py
+quick_*.py
+show_*.py
+view_*.py
+
+# API response dumps
+*_response.json
+beauty_response.json
+athlete_response.json
+perimenopause_*.json
