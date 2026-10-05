@@ -110,13 +110,21 @@ def _get_user_cycle_data(user_id: int) -> dict[str, Any]:
             row = cursor.fetchone()
             
             if not row or not row.get("period_start_date"):
-                return {"cycle_day": None, "phase": None, "has_data": False}
+                return {"cycle_day": None, "phase": None, "has_data": False, "period_start_date": None, "period_end_date": None}
             
             period_start = row["period_start_date"]
             if isinstance(period_start, str):
                 period_start = datetime.fromisoformat(period_start).date()
             elif isinstance(period_start, datetime):
                 period_start = period_start.date()
+            
+            # Parse period_end_date
+            period_end = row.get("period_end_date")
+            if period_end:
+                if isinstance(period_end, str):
+                    period_end = datetime.fromisoformat(period_end).date()
+                elif isinstance(period_end, datetime):
+                    period_end = period_end.date()
             
             # Calculate cycle day
             today = date.today()
@@ -135,11 +143,12 @@ def _get_user_cycle_data(user_id: int) -> dict[str, Any]:
                 "phase": phase,
                 "cycle_length": cycle_length,
                 "period_start_date": str(period_start),
+                "period_end_date": str(period_end) if period_end else None,
                 "has_data": True,
             }
     except Exception as e:
         print(f"[ERROR] _get_user_cycle_data failed: {e}")
-        return {"cycle_day": None, "phase": None, "has_data": False}
+        return {"cycle_day": None, "phase": None, "has_data": False, "period_start_date": None, "period_end_date": None}
 
 
 def _get_user_hrv_data(user_id: int) -> dict[str, Any]:
@@ -423,7 +432,9 @@ def _coerce_numera_insight_payload(
             cycle_data.get("phase"),
             hrv_data.get("hrv"),
             hrv_data.get("hrv_status"),
-            None
+            None,
+            cycle_data.get("period_start_date"),
+            cycle_data.get("period_end_date")
         )
 
     cycle_day = cycle_data.get("cycle_day")
@@ -449,6 +460,8 @@ def _coerce_numera_insight_payload(
         "cycle_day": cycle_day,  # Use REAL cycle day (can be None)
         "theme": theme,  # Use REAL phase
         "priority": str(payload.get("priority") or "high"),
+        "period_start_date": cycle_data.get("period_start_date"),
+        "period_end_date": cycle_data.get("period_end_date"),
     }
 
 
@@ -457,7 +470,9 @@ def _fallback_numera_insight(
     phase: str = None, 
     hrv: float = None, 
     hrv_status: str = None,
-    user_name: str = None
+    user_name: str = None,
+    period_start_date: str = None,
+    period_end_date: str = None
 ) -> dict[str, Any]:
     """Generate fallback insight using REAL data when LLM fails."""
     
@@ -486,6 +501,8 @@ def _fallback_numera_insight(
         "cycle_day": cycle_day,
         "theme": theme,
         "priority": "high",
+        "period_start_date": period_start_date,
+        "period_end_date": period_end_date,
     }
 
 
