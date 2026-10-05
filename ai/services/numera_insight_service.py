@@ -303,8 +303,10 @@ Return JSON with exactly this structure:
 Requirements:
 - Use the user's ACTUAL cycle day: {cycle_day}
 - Use the user's ACTUAL HRV: {hrv}ms (status: {hrv_status})
-- If user_name exists, include it naturally in headline: "{user_name}"
-- Headline should be 1-2 sentences maximum based on their current phase.
+- If user_name exists, include it naturally at the start: "{user_name}, ..."
+- Headline MUST be exactly 2 sentences:
+  - Sentence 1: Main insight about current phase/energy (include Day {cycle_day})
+  - Sentence 2: Specific actionable context (e.g., "Ovulation likely within 24-48 hours" or "About X days until your next period")
 - Description should mention HRV if available, or encourage wearable connection if not.
 - Keep all fields UI-ready.
 - Do NOT use hardcoded values like "Day 14" or "58ms" unless that's the real data.
@@ -512,25 +514,29 @@ def _generate_fallback_headline(
     hrv_data: dict = None,
     user_name: str = None
 ) -> str:
-    """Generate personalized headline based on real data."""
+    """Generate personalized 2-sentence headline based on real data."""
     
     name_prefix = f"{user_name}, " if user_name else ""
     
     if not cycle_day:
         # No cycle data
         if hrv_data and hrv_data.get("hrv"):
-            return f"{name_prefix}Your HRV is tracking well today."
-        return f"{name_prefix}Start logging your cycle for personalized insights."
+            hrv = int(hrv_data["hrv"])
+            return f"{name_prefix}your HRV is at {hrv}ms today. A good sign your body is balanced."
+        return f"{name_prefix}start logging your cycle for personalized insights. We'll tailor guidance to your rhythm."
     
-    # Phase-specific headlines
+    # Phase-specific 2-sentence headlines
     if phase == "menstrual":
-        return f"{name_prefix}Your body is in recovery mode. Honor the rest."
+        return f"{name_prefix}your body is in recovery mode on Day {cycle_day}. Honor the rest — it's productive."
     elif phase == "follicular":
-        return f"{name_prefix}Your energy is building. Great time for new initiatives."
+        return f"{name_prefix}your energy is building on Day {cycle_day}. Great window for new projects and challenges."
     elif phase == "ovulation":
-        return f"{name_prefix}You're entering your peak energy window. Ovulation likely within 24–48 hours."
+        return f"{name_prefix}you're entering your peak energy window. Ovulation likely within 24–48 hours."
     else:  # luteal
-        return f"{name_prefix}Your energy is winding down. Focus on completion, not new starts."
+        days_to_period = 28 - cycle_day if cycle_day else None
+        if days_to_period and days_to_period > 0:
+            return f"{name_prefix}your energy is winding down on Day {cycle_day}. About {days_to_period} days until your next period."
+        return f"{name_prefix}your energy is winding down. Focus on wrapping up, not starting new."
 
 
 def _generate_fallback_description(hrv_data: dict = None) -> str:
