@@ -11,6 +11,7 @@ import hashlib
 import json
 import time
 from calendar import monthrange
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -115,6 +116,12 @@ _AI_CACHE: dict[str, str] = {}
 _AI_JSON_CACHE: dict[str, dict[str, Any]] = {}
 _PHASE_EDU_CACHE: dict[str, dict[str, str]] = {}
 _USER_STATE: dict[int, dict[str, Any]] = {}
+
+# Short-lived cache for the heavy DB + external HTTP fetch in _cycle_state.
+# Many endpoints call _cycle_state back-to-back for the same user; reusing
+# the result for a few seconds removes 5-10s of latency per follow-up call.
+_STATE_CACHE: dict[int, tuple[float, dict[str, Any], dict[str, Any]]] = {}
+_STATE_CACHE_TTL_SECONDS = 30.0
 
 
 class ConsentRequiredError(Exception):
@@ -302,11 +309,16 @@ def engine_overview(user_id: int) -> dict[str, Any]:
     _require_consent_if_needed(state)
     reconciliation = _recompute_reconciliation(state)
 
-    return {
-        "summary": _engine_summary_from_state(state, reconciliation),
-        "signal_status": _engine_signal_status_from_state(state, reconciliation),
-        "discrepancy_note": _engine_discrepancy_note_from_state(state, reconciliation),
-    }
+    # Run the 3 Claude-backed builders in parallel (each is an I/O-bound HTTP call)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_summary = executor.submit(_engine_summary_from_state, state, reconciliation)
+        f_signal = executor.submit(_engine_signal_status_from_state, state, reconciliation)
+        f_discrepancy = executor.submit(_engine_discrepancy_note_from_state, state, reconciliation)
+        return {
+            "summary": f_summary.result(),
+            "signal_status": f_signal.result(),
+            "discrepancy_note": f_discrepancy.result(),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1244,13 +1256,17 @@ def ttc_overview(user_id: int) -> dict[str, Any]:
     state = _cycle_state(user_id)
     _require_consent_if_needed(state)
     reconciliation = _recompute_reconciliation(state)
-    
-    # ✅ Generate all three AI responses with shared state
-    return {
-        "surge_banner": _ttc_surge_banner_ai_only(state, reconciliation),
-        "priority_map": _ttc_priority_map_ai_only(state, reconciliation),
-        "priority_banner": _ttc_priority_banner_ai_only(state, reconciliation),
-    }
+
+    # Run the 3 Claude-backed builders in parallel (each is an I/O-bound HTTP call)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_surge = executor.submit(_ttc_surge_banner_ai_only, state, reconciliation)
+        f_map = executor.submit(_ttc_priority_map_ai_only, state, reconciliation)
+        f_banner = executor.submit(_ttc_priority_banner_ai_only, state, reconciliation)
+        return {
+            "surge_banner": f_surge.result(),
+            "priority_map": f_map.result(),
+            "priority_banner": f_banner.result(),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1490,6 +1506,12 @@ def _user_state(user_id: int) -> dict[str, Any]:
 
 
 def _cycle_state(user_id: int) -> dict[str, Any]:
+    cached = _STATE_CACHE.get(user_id)
+    if cached is not None:
+        ts, state, _reconciliation = cached
+        if time.time() - ts < _STATE_CACHE_TTL_SECONDS:
+            return state
+
     user = _user_state(user_id)
 
     calendar_periods, calendar_source = _fetch_cycle_calendar_periods(user_id)
@@ -1617,6 +1639,7 @@ def _cycle_state(user_id: int) -> dict[str, Any]:
         "snapshot": snapshot,
         "_user": user,
     }
+    _STATE_CACHE[user_id] = (time.time(), state, {})
     return state
 
 
@@ -1688,15 +1711,23 @@ def _fetch_cycle_calendar_periods(user_id: int) -> tuple[list[dict[str, Any]], s
 
 def _has_cycle_data(user_id: int) -> bool:
     """Check if user has any real cycle data in database."""
+    cached = _STATE_CACHE.get(user_id)
+    if cached is not None and time.time() - cached[0] < _STATE_CACHE_TTL_SECONDS:
+        state = cached[1]
+        return bool(
+            state.get("period_logs") or state.get("bbt_logs")
+            or state.get("opk_logs") or state.get("mucus_logs")
+        )
+
     calendar_periods, _ = _fetch_cycle_calendar_periods(user_id)
     db_snapshot = get_db_snapshot(user_id)
-    
+
     # Check for any actual logged data
     has_periods = calendar_periods and len(calendar_periods) > 0
     has_bbt = db_snapshot.get("bbt_logs") and len(db_snapshot.get("bbt_logs", [])) > 0
     has_opk = db_snapshot.get("opk_logs") and len(db_snapshot.get("opk_logs", [])) > 0
     has_mucus = db_snapshot.get("mucus_logs") and len(db_snapshot.get("mucus_logs", [])) > 0
-    
+
     return has_periods or has_bbt or has_opk or has_mucus
 
 
@@ -1975,6 +2006,7 @@ def _clear_ai_caches() -> None:
     _AI_CACHE.clear()
     _AI_JSON_CACHE.clear()
     _PHASE_EDU_CACHE.clear()
+    _STATE_CACHE.clear()
 
 
 def _ai_endpoint_response(
