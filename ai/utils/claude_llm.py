@@ -3,10 +3,11 @@ from ai.config import settings
 
 
 class ClaudeLLM:
-    def __init__(self, api_key: str = None, model: str = None):
+    def __init__(self, api_key: str = None, model: str = None, timeout: float = 20.0):
         self.api_key = api_key or settings.CLAUDE_API_KEY
         self.model = model or settings.CLAUDE_MODEL
-        self.client = anthropic.Anthropic(api_key=self.api_key)
+        # Override anthropic SDK's 600s default so slow calls fail fast enough for request paths.
+        self.client = anthropic.Anthropic(api_key=self.api_key, timeout=timeout)
 
     def chat(
         self,
